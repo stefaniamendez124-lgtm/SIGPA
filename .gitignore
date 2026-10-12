@@ -1,6 +1,10 @@
 # Carpetas de compilación de .NET
 bin/
 obj/
+node_modules/
+dist/
+dist-ssr/
+*.local
 
 # Archivos de configuración con contraseñas o claves
 appsettings.Development.json
