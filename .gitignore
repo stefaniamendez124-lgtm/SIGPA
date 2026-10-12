@@ -1,0 +1,6 @@
+# Carpetas de compilación de .NET
+bin/
+obj/
+
+# Archivos de configuración con contraseñas o claves
+appsettings.Development.json
