@@ -5,27 +5,51 @@ using SigpaBackend.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-builder.Services.AddDbContext<SigpaContext>(options => 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("PermitirFrontend", policy =>
+    {
+        policy.WithOrigins("http://localhost:5173")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+var connectionString =
+    builder.Configuration.GetConnectionString("DefaultConnection") ??
+    Environment.GetEnvironmentVariable("DATABASE_URL") ??
+    string.Empty;
+
+builder.Services.AddDbContext<SigpaContext>(options =>
     options.UseNpgsql(connectionString)
-           .UseSnakeCaseNamingConvention()); // ¡Esta es la línea mágica!
+           .UseSnakeCaseNamingConvention());
 
-var supabaseUrl = builder.Configuration["Supabase:Url"];
+var supabaseUrl = builder.Configuration["Supabase:Url"] ?? Environment.GetEnvironmentVariable("SUPABASE_URL");
 
-// Configuración de seguridad actualizada para llaves asimétricas (ES256/RS256)
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        // Authority obliga a .NET a descargar la llave pública oficial de tu Supabase
-        options.Authority = $"{supabaseUrl}/auth/v1";
-        
-        options.TokenValidationParameters = new TokenValidationParameters
+        if (!string.IsNullOrWhiteSpace(supabaseUrl))
         {
-            ValidateIssuerSigningKey = true,
-            ValidAudience = "authenticated",
-            ValidIssuer = $"{supabaseUrl}/auth/v1",
-            ValidateLifetime = true
-        };
+            options.Authority = $"{supabaseUrl}/auth/v1";
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                ValidAudience = "authenticated",
+                ValidIssuer = $"{supabaseUrl}/auth/v1",
+                ValidateLifetime = true
+            };
+        }
+        else
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = false,
+                ValidateIssuer = false,
+                ValidateAudience = false,
+                ValidateLifetime = true
+            };
+        }
     });
 
 builder.Services.AddControllers();
@@ -33,6 +57,8 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
+
+app.UseCors("PermitirFrontend");
 
 if (app.Environment.IsDevelopment())
 {
@@ -42,7 +68,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-app.UseAuthentication(); 
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

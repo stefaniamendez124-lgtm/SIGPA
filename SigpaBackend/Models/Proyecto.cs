@@ -11,16 +11,20 @@ namespace SigpaBackend.Models
 
         public string Descripcion { get; set; } = string.Empty;
 
-        public DateTime FechaInicio { get; set; }
+        public string Curso { get; set; } = "Ingeniería de requisitos";
 
-        public DateTime FechaFin { get; set; }
+        public int Progreso { get; set; } = 15;
 
-        // Estado inicial del proyecto
+        public DateTime? FechaInicio { get; set; }
+
+        public DateTime? FechaFin { get; set; }
+
+        public DateTime? FechaEntrega { get; set; }
+
         public string Estado { get; set; } = "Pendiente";
 
         public Guid CreadorId { get; set; }
 
-        // Comentarios del profesor al evaluar el proyecto
         public string? ComentariosEvaluacion { get; set; }
     }
 }

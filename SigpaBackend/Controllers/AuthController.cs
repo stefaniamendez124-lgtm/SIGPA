@@ -65,7 +65,18 @@ namespace SigpaBackend.Controllers
                     FechaCreacion = DateTime.UtcNow
                 };
 
-                _context.Usuarios.Add(nuevoUsuario);
+                var usuarioExistente = await _context.Usuarios.FindAsync(nuevoUsuario.Id);
+                if (usuarioExistente == null)
+                {
+                    _context.Usuarios.Add(nuevoUsuario);
+                }
+                else
+                {
+                    usuarioExistente.NombreCompleto = nuevoUsuario.NombreCompleto;
+                    usuarioExistente.CorreoInstitucional = nuevoUsuario.CorreoInstitucional;
+                    usuarioExistente.Rol = nuevoUsuario.Rol;
+                }
+
                 await _context.SaveChangesAsync();
 
                 return Ok(new { mensaje = "Usuario registrado exitosamente", usuarioId = nuevoUsuario.Id });
@@ -99,7 +110,11 @@ namespace SigpaBackend.Controllers
                 var response = await httpClient.PostAsync($"{supabaseUrl}/auth/v1/token?grant_type=password", jsonPayload);
 
                 if (!response.IsSuccessStatusCode)
-                    return Unauthorized("Correo o contraseña incorrectos.");
+{
+    var errorSupabase = await response.Content.ReadAsStringAsync();
+    Console.WriteLine($"---> RESPUESTA REAL DE SUPABASE: {errorSupabase}"); // <-- Añade esta línea
+    return Unauthorized("Correo o contraseña incorrectos.");
+}
 
                 var responseString = await response.Content.ReadAsStringAsync();
                 var jsonResponse = JsonSerializer.Deserialize<JsonElement>(responseString);
