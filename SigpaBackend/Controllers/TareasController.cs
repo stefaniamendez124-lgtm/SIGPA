@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SigpaBackend.Data;
 using SigpaBackend.Models;
+using SigpaBackend.Services;
 using System.Linq;
 
 namespace SigpaBackend.Controllers
@@ -13,29 +14,57 @@ namespace SigpaBackend.Controllers
     public class TareasController : ControllerBase
     {
         private readonly SigpaContext _context;
+        private readonly UserAccessService _access;
+        private readonly AuditService _audit;
 
-        public TareasController(SigpaContext context)
+        public TareasController(SigpaContext context, UserAccessService access, AuditService audit)
         {
             _context = context;
+            _access = access;
+            _audit = audit;
+        }
+
+        [HttpGet("proyectos/{proyectoId:guid}/tareas")]
+        public async Task<IActionResult> ObtenerTareas(Guid proyectoId)
+        {
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.CanReadProjectAsync(proyectoId, userId.Value)) return NotFound();
+
+            var tasks = await _context.TareasKanban
+                .Where(task => task.ProyectoId == proyectoId)
+                .OrderBy(task => task.Estado == "Por Hacer" ? 0 : task.Estado == "En Proceso" ? 1 : 2)
+                .ThenBy(task => task.FechaVencimiento)
+                .ToListAsync();
+            return Ok(tasks);
         }
 
         // 1. Crear una nueva tarjeta en el tablero del proyecto
         [HttpPost("proyectos/{proyectoId}/tareas")]
         public async Task<IActionResult> CrearTarea(Guid proyectoId, [FromBody] CrearTareaDto request)
         {
-            var proyectoExiste = await _context.Proyectos.AnyAsync(p => p.Id == proyectoId);
-            if (!proyectoExiste) return NotFound("Proyecto no encontrado.");
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.IsProjectMemberAsync(proyectoId, userId.Value)) return NotFound("Proyecto no encontrado.");
+            if (request.ResponsableId is null || request.ResponsableId == Guid.Empty)
+                return BadRequest("La tarea debe tener un responsable asignado.");
+            if (!await _access.IsProjectMemberAsync(proyectoId, request.ResponsableId.Value))
+                return BadRequest("El responsable debe pertenecer al equipo del proyecto.");
+            if (string.IsNullOrWhiteSpace(request.Titulo))
+                return BadRequest("El título de la tarea es obligatorio.");
 
             var nuevaTarea = new TareaKanban
             {
                 ProyectoId = proyectoId,
                 Titulo = request.Titulo,
-                ResponsableId = request.ResponsableId,
+                Descripcion = request.Descripcion,
+                ResponsableId = request.ResponsableId.Value,
                 FechaVencimiento = request.FechaVencimiento?.ToUniversalTime(),
                 Estado = "Por Hacer" // Siempre inicia en la primera columna
             };
 
             _context.TareasKanban.Add(nuevaTarea);
+            _audit.Record(userId, "kanban.tarea_creada", "tarea_kanban", nuevaTarea.Id);
             await _context.SaveChangesAsync();
 
             return CreatedAtAction(nameof(CrearTarea), new { id = nuevaTarea.Id }, nuevaTarea);
@@ -47,15 +76,24 @@ namespace SigpaBackend.Controllers
         {
             var tarea = await _context.TareasKanban.FindAsync(id);
             if (tarea == null) return NotFound("Tarea no encontrada.");
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.IsProjectMemberAsync(tarea.ProyectoId, userId.Value))
+                return NotFound("Tarea no encontrada.");
+            if (string.IsNullOrWhiteSpace(request.Estado))
+                return BadRequest("El estado de la tarea es obligatorio.");
 
-            // Validamos que no intenten inyectar columnas falsas
-            var estadosValidos = new[] { "Por Hacer", "En Proceso", "Completado" };
-            if (!estadosValidos.Contains(request.Estado))
+            var estadoNormalizado = request.Estado.Trim() == "Completado"
+                ? "Hecho"
+                : request.Estado.Trim();
+            var estadosValidos = new[] { "Por Hacer", "En Proceso", "Hecho" };
+            if (!estadosValidos.Contains(estadoNormalizado))
             {
-                return BadRequest("Estado no válido. Debe ser 'Por Hacer', 'En Proceso' o 'Completado'.");
+                return BadRequest("Estado no válido. Debe ser 'Por Hacer', 'En Proceso' o 'Hecho'.");
             }
 
-            tarea.Estado = request.Estado;
+            tarea.Estado = estadoNormalizado;
+            _audit.Record(userId, "kanban.tarea_movida", "tarea_kanban", tarea.Id);
             await _context.SaveChangesAsync();
 
             return Ok(new { mensaje = "Tarjeta movida exitosamente", estadoActual = tarea.Estado });

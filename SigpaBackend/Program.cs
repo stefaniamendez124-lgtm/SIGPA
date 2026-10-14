@@ -5,11 +5,14 @@ using SigpaBackend.Data;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var allowedOrigins = (builder.Configuration["Cors:AllowedOrigins"] ?? "http://localhost:5173")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("PermitirFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:5173")
+        policy.WithOrigins(allowedOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
@@ -26,32 +29,29 @@ builder.Services.AddDbContext<SigpaContext>(options =>
 
 var supabaseUrl = builder.Configuration["Supabase:Url"] ?? Environment.GetEnvironmentVariable("SUPABASE_URL");
 
+if (string.IsNullOrWhiteSpace(supabaseUrl))
+{
+    throw new InvalidOperationException("Configure Supabase:Url o SUPABASE_URL para validar los JWT.");
+}
+supabaseUrl = supabaseUrl.TrimEnd('/');
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        if (!string.IsNullOrWhiteSpace(supabaseUrl))
+        options.Authority = $"{supabaseUrl}/auth/v1";
+        options.TokenValidationParameters = new TokenValidationParameters
         {
-            options.Authority = $"{supabaseUrl}/auth/v1";
-            options.TokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateIssuerSigningKey = true,
-                ValidAudience = "authenticated",
-                ValidIssuer = $"{supabaseUrl}/auth/v1",
-                ValidateLifetime = true
-            };
-        }
-        else
-        {
-            options.TokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateIssuerSigningKey = false,
-                ValidateIssuer = false,
-                ValidateAudience = false,
-                ValidateLifetime = true
-            };
-        }
+            ValidateIssuerSigningKey = true,
+            ValidAudience = "authenticated",
+            ValidIssuer = $"{supabaseUrl}/auth/v1",
+            ValidateLifetime = true
+        };
     });
 
+builder.Services.AddScoped<SigpaBackend.Services.UserAccessService>();
+builder.Services.AddScoped<SigpaBackend.Services.AuditService>();
+builder.Services.AddHttpClient<SigpaBackend.Services.SupabaseStorageService>();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();

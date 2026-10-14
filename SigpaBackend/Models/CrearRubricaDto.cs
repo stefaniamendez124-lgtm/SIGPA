@@ -8,6 +8,15 @@ namespace SigpaBackend.Models
         public string Nombre { get; set; } = string.Empty;
         public string Descripcion { get; set; } = string.Empty;
         public decimal PesoPorcentual { get; set; }
+        public List<NivelRubricaDto> Niveles { get; set; } = new();
+    }
+
+    public class NivelRubricaDto
+    {
+        public int Nivel { get; set; }
+        public string Etiqueta { get; set; } = string.Empty;
+        public string Descripcion { get; set; } = string.Empty;
+        public decimal Puntaje { get; set; }
     }
 
     // Esto representa la rúbrica completa (una lista de criterios)

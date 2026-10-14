@@ -8,6 +8,8 @@ namespace SigpaBackend.Models
         public Guid ProyectoId { get; set; }
         
         public string Titulo { get; set; } = string.Empty;
+
+        public string Descripcion { get; set; } = string.Empty;
         
         // Puede ser null si la tarea aún no tiene a nadie asignado
         public Guid? ResponsableId { get; set; } 

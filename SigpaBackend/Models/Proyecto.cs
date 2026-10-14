@@ -1,5 +1,6 @@
 
 using System;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace SigpaBackend.Models
 {
@@ -11,6 +12,13 @@ namespace SigpaBackend.Models
 
         public string Descripcion { get; set; } = string.Empty;
 
+        public string Problema { get; set; } = string.Empty;
+
+        public string ObjetivoGeneral { get; set; } = string.Empty;
+
+        [NotMapped]
+        public List<string> ObjetivosEspecificos { get; set; } = [];
+
         public string Curso { get; set; } = "Ingeniería de requisitos";
 
         public int Progreso { get; set; } = 15;
@@ -19,12 +27,14 @@ namespace SigpaBackend.Models
 
         public DateTime? FechaFin { get; set; }
 
-        public DateTime? FechaEntrega { get; set; }
+        public DateOnly? FechaEntrega { get; set; }
 
         public string Estado { get; set; } = "Pendiente";
 
         public Guid CreadorId { get; set; }
 
         public string? ComentariosEvaluacion { get; set; }
+
+        public DateTime? FechaCorreccionHasta { get; set; }
     }
 }

@@ -11,5 +11,11 @@ namespace SigpaBackend.Models
         public Guid UsuarioId { get; set; }
         
         public DateTime FechaRegistro { get; set; } = DateTime.UtcNow;
+
+        public string Estado { get; set; } = "Aceptado";
+
+        public Guid? InvitadoPor { get; set; }
+
+        public DateTime? RespondidoAt { get; set; }
     }
 }

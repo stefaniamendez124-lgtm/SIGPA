@@ -49,6 +49,8 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
   const [teacherReviewProjects, setTeacherReviewProjects] = useState<ProjectItem[]>([]);
   const [projectName, setProjectName] = useState('');
   const [projectDescription, setProjectDescription] = useState('');
+  const [projectObjective, setProjectObjective] = useState('');
+  const [projectSpecificObjectives, setProjectSpecificObjectives] = useState('');
   const [projectCourse, setProjectCourse] = useState('Ingeniería de requisitos');
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [projectSaving, setProjectSaving] = useState(false);
@@ -120,35 +122,54 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!projectName.trim()) {
+    const specificObjectives = projectSpecificObjectives
+      .split(/\r?\n/)
+      .map((objective) => objective.trim())
+      .filter(Boolean);
+
+    if (!projectName.trim() || !projectDescription.trim() || !projectObjective.trim() || specificObjectives.length === 0) {
+      setProjectError('Completa el título, problema, objetivo general y al menos un objetivo específico.');
       return;
     }
 
     setProjectSaving(true);
     setProjectError(null);
-    const projectDate = new Date();
-    projectDate.setDate(projectDate.getDate() + 14);
-    const projectEnd = projectDate.toISOString();
-
     try {
-      const { error } = await supabase.from('proyectos').insert({
-        nombre: projectName,
-        descripcion: projectDescription || 'Proyecto nuevo registrado en SIGPA.',
-        curso: projectCourse,
-        estado: 'Pendiente',
-        progreso: 15,
-        fecha_inicio: new Date().toISOString(),
-        fecha_fin: projectEnd,
-        fecha_entrega: projectDate.toISOString().slice(0, 10),
-        creador_id: user.id,
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !sessionData.session) {
+        throw sessionError ?? new Error('La sesión expiró. Inicia sesión nuevamente.');
+      }
+
+      const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+      if (!apiBase) {
+        throw new Error('Configura VITE_API_BASE para registrar propuestas.');
+      }
+
+      const response = await fetch(`${apiBase}/api/proyectos`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${sessionData.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          nombre: projectName.trim(),
+          descripcion: projectDescription.trim(),
+          problema: projectDescription.trim(),
+          objetivoGeneral: projectObjective.trim(),
+          objetivosEspecificos: specificObjectives,
+          curso: projectCourse,
+        }),
       });
 
-      if (error) {
-        throw error;
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null) as { detail?: string; title?: string } | null;
+        throw new Error(errorBody?.detail || errorBody?.title || `No se pudo registrar la propuesta (HTTP ${response.status}).`);
       }
 
       setProjectName('');
       setProjectDescription('');
+      setProjectObjective('');
+      setProjectSpecificObjectives('');
       setProjectCourse('Ingeniería de requisitos');
       await syncProjects();
     } catch (saveError) {
@@ -158,20 +179,34 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
     }
   };
 
-  const handleTeacherDecision = async (projectId: string, status: ProjectStatus) => {
+  const handleTeacherDecision = async (projectId: string, status: 'Aprobado' | 'Rechazado') => {
     setProjectError(null);
     try {
-      const { error } = await supabase
-        .from('proyectos')
-        .update({
-          estado: status,
-          progreso: status === 'Aprobado' ? 100 : 70,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', projectId);
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !sessionData.session) {
+        throw sessionError ?? new Error('La sesión expiró. Inicia sesión nuevamente.');
+      }
 
-      if (error) {
-        throw error;
+      const comentarios = status === 'Rechazado'
+        ? window.prompt('Indica las observaciones para que el equipo pueda corregir la propuesta:')
+        : '';
+      if (status === 'Rechazado' && !comentarios?.trim()) return;
+
+      const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+      if (!apiBase) throw new Error('Configura VITE_API_BASE para dictaminar propuestas.');
+
+      const response = await fetch(`${apiBase}/api/proyectos/${projectId}/evaluar`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${sessionData.session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ estado: status, comentarios }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null) as { detail?: string; title?: string } | null;
+        throw new Error(errorBody?.detail || errorBody?.title || `No se pudo dictaminar la propuesta (HTTP ${response.status}).`);
       }
 
       await syncProjects();
@@ -239,8 +274,18 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
                 </div>
 
                 <div>
-                  <label style={{ display: 'block', marginBottom: '8px', color: '#cbd5e1' }}>Planteamiento del problema y objetivos</label>
-                  <textarea value={projectDescription} onChange={(e) => setProjectDescription(e.target.value)} rows={5} placeholder="Describe la necesidad, la solución propuesta y los objetivos del proyecto..." style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', background: '#020817', border: '1px solid #334155', borderRadius: '10px', color: '#fff', padding: '12px 14px' }} />
+                  <label style={{ display: 'block', marginBottom: '8px', color: '#cbd5e1' }}>Planteamiento del problema</label>
+                  <textarea value={projectDescription} onChange={(e) => setProjectDescription(e.target.value)} required rows={4} placeholder="Describe el problema que el proyecto busca resolver..." style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', background: '#020817', border: '1px solid #334155', borderRadius: '10px', color: '#fff', padding: '12px 14px' }} />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', marginBottom: '8px', color: '#cbd5e1' }}>Objetivo general</label>
+                  <textarea value={projectObjective} onChange={(e) => setProjectObjective(e.target.value)} required rows={2} placeholder="Describe el resultado principal esperado..." style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', background: '#020817', border: '1px solid #334155', borderRadius: '10px', color: '#fff', padding: '12px 14px' }} />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', marginBottom: '8px', color: '#cbd5e1' }}>Objetivos específicos (uno por línea)</label>
+                  <textarea value={projectSpecificObjectives} onChange={(e) => setProjectSpecificObjectives(e.target.value)} required rows={3} placeholder={'Identificar las necesidades...\nDiseñar la solución...'} style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', background: '#020817', border: '1px solid #334155', borderRadius: '10px', color: '#fff', padding: '12px 14px' }} />
                 </div>
 
                 <button type="submit" disabled={projectSaving} style={{ background: 'linear-gradient(135deg, #22c55e, #16a34a)', border: 'none', borderRadius: '10px', color: '#fff', fontWeight: 700, padding: '12px 16px', cursor: projectSaving ? 'wait' : 'pointer' }}>{projectSaving ? 'Guardando...' : 'Guardar proyecto'}</button>
@@ -312,9 +357,12 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
                     </div>
 
                     <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                      <button onClick={() => handleTeacherDecision(project.id, 'Aprobado')} style={{ background: '#16a34a', border: 'none', borderRadius: '8px', padding: '10px 12px', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Aprobar</button>
-                      <button onClick={() => handleTeacherDecision(project.id, 'En revisión')} style={{ background: '#2563eb', border: 'none', borderRadius: '8px', padding: '10px 12px', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Revisar</button>
-                      <button onClick={() => handleTeacherDecision(project.id, 'Pendiente')} style={{ background: '#475569', border: 'none', borderRadius: '8px', padding: '10px 12px', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Pendiente</button>
+                      {(project.status === 'Pendiente' || project.status === 'En revisión') && (
+                        <>
+                          <button onClick={() => void handleTeacherDecision(project.id, 'Aprobado')} style={{ background: '#16a34a', border: 'none', borderRadius: '8px', padding: '10px 12px', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Aprobar</button>
+                          <button onClick={() => void handleTeacherDecision(project.id, 'Rechazado')} style={{ background: '#b91c1c', border: 'none', borderRadius: '8px', padding: '10px 12px', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>Rechazar con observaciones</button>
+                        </>
+                      )}
                     </div>
                   </div>
                 ))}
