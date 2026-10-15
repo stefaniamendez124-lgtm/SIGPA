@@ -1,10 +1,118 @@
 -- Migracion aditiva: ejecutar despues de schema.sql.
 -- No elimina ni renombra columnas/tablas existentes.
 
+create table if not exists public.cursos (
+  id uuid primary key default gen_random_uuid(),
+  codigo text not null unique,
+  nombre text not null,
+  docente_id uuid references public.usuarios(id) on delete set null,
+  activo boolean not null default true
+);
+
+create table if not exists public.matriculas (
+  id uuid primary key default gen_random_uuid(),
+  curso_id uuid not null references public.cursos(id) on delete cascade,
+  estudiante_id uuid not null references public.usuarios(id) on delete cascade,
+  estado text not null default 'Activa'
+    check (estado in ('Activa', 'Retirada', 'Finalizada')),
+  creada_at timestamptz not null default now(),
+  unique (curso_id, estudiante_id)
+);
+
+create table if not exists public.notificaciones (
+  id uuid primary key default gen_random_uuid(),
+  usuario_id uuid not null references public.usuarios(id) on delete cascade,
+  proyecto_id uuid references public.proyectos(id) on delete set null,
+  tipo text not null,
+  mensaje text not null,
+  creada_at timestamptz not null default now(),
+  leida_at timestamptz
+);
+
+alter table public.proyectos
+  add column if not exists curso_id uuid references public.cursos(id) on delete restrict;
+
+create index if not exists matriculas_estudiante_estado_idx
+  on public.matriculas(estudiante_id, estado);
+create index if not exists notificaciones_usuario_fecha_idx
+  on public.notificaciones(usuario_id, creada_at desc);
+
+create or replace function public.validar_matricula_integrante()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  asignatura_id uuid;
+begin
+  select curso_id into asignatura_id
+  from public.proyectos
+  where id = new.proyecto_id;
+
+  if asignatura_id is not null and new.estado in ('Invitado', 'Aceptado')
+     and not exists (
+       select 1 from public.matriculas m
+       join public.usuarios u on u.id = m.estudiante_id
+       where m.curso_id = asignatura_id
+         and m.estudiante_id = new.usuario_id
+         and m.estado = 'Activa'
+         and u.rol = 'Estudiante'
+     ) then
+    raise exception 'El estudiante no tiene matrícula activa en la asignatura (RN-02)';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists proyecto_integrante_matricula_activa on public.proyecto_integrantes;
+create trigger proyecto_integrante_matricula_activa
+before insert or update of proyecto_id, usuario_id, estado
+on public.proyecto_integrantes
+for each row execute function public.validar_matricula_integrante();
+
+alter table public.notificaciones enable row level security;
+alter table public.cursos enable row level security;
+alter table public.matriculas enable row level security;
+revoke all on public.cursos, public.matriculas from public, anon, authenticated;
+revoke all on public.notificaciones from public, anon, authenticated;
+grant select on public.notificaciones to authenticated;
+drop policy if exists "Users can read their own notifications" on public.notificaciones;
+create policy "Users can read their own notifications"
+on public.notificaciones for select to authenticated
+using (usuario_id = (select auth.uid()));
+
 alter table public.proyectos
   add column if not exists fecha_correccion_hasta timestamptz,
   add column if not exists problema text not null default '',
   add column if not exists objetivo_general text not null default '';
+
+alter table public.proyectos drop constraint if exists proyectos_estado_check;
+alter table public.proyectos
+  add constraint proyectos_estado_check
+  check (estado in ('Pendiente', 'Pendiente de Revisión', 'En revisión', 'Aprobado', 'Rechazado', 'Entregado', 'En progreso'));
+
+do $$
+declare
+  fecha_tipo text;
+begin
+  select data_type into fecha_tipo
+  from information_schema.columns
+  where table_schema = 'public'
+    and table_name = 'entregables'
+    and column_name = 'fecha_limite';
+  if fecha_tipo = 'date' then
+    alter table public.entregables
+      alter column fecha_limite type timestamptz
+      using ((fecha_limite + time '23:59:59') at time zone 'UTC');
+  end if;
+end;
+$$;
+
+update public.entregables
+set fecha_limite = coalesce(fecha_limite, now() + interval '14 days')
+where fecha_limite is null;
+alter table public.entregables alter column fecha_limite set not null;
 
 alter table public.proyecto_integrantes
   add column if not exists estado text not null default 'Aceptado',
@@ -52,6 +160,7 @@ begin
   end if;
 
   perform pg_advisory_xact_lock(hashtext(new.usuario_id::text || ':' || lower(curso_proyecto)));
+  perform pg_advisory_xact_lock(hashtext('estudiante:' || new.usuario_id::text));
   perform pg_advisory_xact_lock(hashtext('proyecto:' || new.proyecto_id::text));
 
   select rol into rol_usuario from public.usuarios where id = new.usuario_id;
@@ -66,9 +175,8 @@ begin
     where pi.usuario_id = new.usuario_id
       and pi.proyecto_id <> new.proyecto_id
       and pi.estado in ('Invitado', 'Aceptado')
-      and lower(p.curso) = lower(curso_proyecto)
   ) then
-    raise exception 'El estudiante ya pertenece a un equipo de esta asignatura (RN-02)';
+    raise exception 'El estudiante pertenece a otro grupo o curso (RN-02)';
   end if;
 
   select count(*) into integrantes_activos
@@ -85,8 +193,8 @@ begin
   ) then
     integrantes_activos := integrantes_activos + 1;
   end if;
-  if integrantes_activos >= 5 then
-    raise exception 'El equipo ya alcanzó el límite máximo de 5 integrantes (RN-02)';
+  if integrantes_activos >= 6 then
+    raise exception 'El equipo ya alcanzó el límite máximo de 6 integrantes (RN-02)';
   end if;
 
   return new;

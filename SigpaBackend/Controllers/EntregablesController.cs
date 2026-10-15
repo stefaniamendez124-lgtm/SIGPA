@@ -35,6 +35,122 @@ namespace SigpaBackend.Controllers
             _logger = logger;
         }
 
+        [HttpGet("/api/projects/{projectId:guid}/milestones")]
+        public async Task<IActionResult> ObtenerHitosDelProyecto(Guid projectId)
+        {
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.CanReadProjectAsync(projectId, userId.Value)) return NotFound();
+
+            var milestones = await _context.Entregables
+                .Where(deliverable => deliverable.ProyectoId == projectId)
+                .OrderBy(deliverable => deliverable.FechaLimite)
+                .ToListAsync();
+            return Ok(milestones);
+        }
+
+        [HttpPost("/api/projects/{projectId:guid}/deliverables")]
+        [RequestSizeLimit(26 * 1024 * 1024)]
+        public async Task<IActionResult> SubirEntregaDelProyecto(
+            Guid projectId,
+            [FromForm] SubirEntregableProyectoDto request,
+            CancellationToken cancellationToken)
+        {
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.IsProjectMemberAsync(projectId, userId.Value))
+                return NotFound("Proyecto no encontrado.");
+
+            if (request.HitoId == Guid.Empty)
+                return BadRequest("Selecciona el hito de entrega.");
+            var deliverable = await _context.Entregables.FirstOrDefaultAsync(item =>
+                item.Id == request.HitoId && item.ProyectoId == projectId && item.Estado == "Pendiente");
+            if (deliverable is null)
+                return Conflict("El hito seleccionado no está pendiente o no pertenece al proyecto.");
+
+            if ((request.Archivo is null) == string.IsNullOrWhiteSpace(request.Url))
+                return BadRequest("Adjunta un archivo PDF/ZIP o proporciona un enlace HTTPS.");
+
+            var submittedAt = DateTimeOffset.UtcNow;
+            var isLate = submittedAt > deliverable.FechaLimite;
+            if (isLate && !deliverable.PermiteEntregaExtemporanea)
+                return BadRequest("La fecha límite ha pasado. No se permiten entregas extemporáneas (RN-01).");
+
+            string evidenceLocation;
+            if (request.Archivo is not null)
+            {
+                try
+                {
+                    evidenceLocation = await _storage.UploadAsync(
+                        projectId,
+                        deliverable.Id,
+                        request.Archivo,
+                        cancellationToken);
+                }
+                catch (InvalidDataException exception)
+                {
+                    return BadRequest(exception.Message);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    _logger.LogError(exception, "El almacenamiento de entregas no está configurado.");
+                    return Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                        title: "El almacenamiento de entregas no está disponible.");
+                }
+                catch (HttpRequestException exception)
+                {
+                    _logger.LogError(exception, "Falló la carga del hito {EntregableId}.", deliverable.Id);
+                    return Problem(statusCode: StatusCodes.Status502BadGateway,
+                        title: "El almacenamiento no pudo guardar el archivo.");
+                }
+            }
+            else
+            {
+                var rawUrl = request.Url!.Trim();
+                if (rawUrl.Length > 2048 ||
+                    !Uri.TryCreate(rawUrl, UriKind.Absolute, out var url) ||
+                    url.Scheme != Uri.UriSchemeHttps ||
+                    !EsOrigenPermitido(url))
+                    return BadRequest("Use un enlace HTTPS de GitHub, Drive o el almacenamiento privado configurado.");
+
+                var filePath = Uri.UnescapeDataString(url.AbsolutePath);
+                var allowedFile = filePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ||
+                                  filePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+                if (!allowedFile && !IsAllowedWebLink(url))
+                    return BadRequest("Solo se admiten archivos PDF/ZIP o enlaces HTTPS de GitHub y Drive.");
+
+                evidenceLocation = rawUrl;
+            }
+
+            var status = isLate ? "Entregado Tardío" : "Entregado a Tiempo";
+            deliverable.ArchivoUrl = evidenceLocation;
+            deliverable.FechaEntrega = submittedAt.UtcDateTime;
+            deliverable.Estado = status;
+            deliverable.PenalizacionAplicadaPct = isLate
+                ? deliverable.PenalizacionExtemporaneaPct
+                : 0;
+            _context.EntregasVersiones.Add(new EntregaVersion
+            {
+                EntregableId = deliverable.Id,
+                EnviadaPor = userId.Value,
+                ArchivoUrl = evidenceLocation,
+                EnviadaAt = submittedAt.UtcDateTime,
+                Estado = status,
+                PenalizacionAplicadaPct = deliverable.PenalizacionAplicadaPct
+            });
+            _audit.Record(userId, "entrega.registrada", "entregable", deliverable.Id);
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                hitoId = deliverable.Id,
+                fecha = submittedAt,
+                estado = status,
+                selloTiempoUtc = submittedAt,
+                penalizacionPct = deliverable.PenalizacionAplicadaPct
+            });
+        }
+
         [HttpPost]
         public async Task<IActionResult> CrearEntregable([FromBody] Entregable entregable)
         {
@@ -90,8 +206,8 @@ namespace SigpaBackend.Controllers
                 return BadRequest("Solo se admiten archivos PDF/ZIP o enlaces HTTPS de GitHub y Drive.");
             }
 
-            var fechaActual = DateTime.UtcNow;
-            var esTardia = DateOnly.FromDateTime(fechaActual) > entregable.FechaLimite;
+            var fechaActual = DateTimeOffset.UtcNow;
+            var esTardia = fechaActual > entregable.FechaLimite;
 
             if (esTardia && !entregable.PermiteEntregaExtemporanea)
             {
@@ -99,7 +215,7 @@ namespace SigpaBackend.Controllers
             }
 
             entregable.ArchivoUrl = avance.ArchivoUrl;
-            entregable.FechaEntrega = fechaActual;
+            entregable.FechaEntrega = fechaActual.UtcDateTime;
             entregable.Estado = esTardia ? "Entregado Tardío" : "Entregado a Tiempo";
             entregable.PenalizacionAplicadaPct = esTardia
                 ? entregable.PenalizacionExtemporaneaPct
@@ -110,7 +226,7 @@ namespace SigpaBackend.Controllers
                 EntregableId = id,
                 EnviadaPor = userId.Value,
                 ArchivoUrl = avance.ArchivoUrl,
-                EnviadaAt = fechaActual,
+                EnviadaAt = fechaActual.UtcDateTime,
                 Estado = entregable.Estado,
                 PenalizacionAplicadaPct = entregable.PenalizacionAplicadaPct
             });
@@ -142,8 +258,8 @@ namespace SigpaBackend.Controllers
                 return NotFound("Entregable no encontrado.");
             if (archivo is null) return BadRequest("Debe adjuntar un archivo PDF o ZIP.");
 
-            var fechaActual = DateTime.UtcNow;
-            var esTardia = DateOnly.FromDateTime(fechaActual) > deliverable.FechaLimite;
+            var fechaActual = DateTimeOffset.UtcNow;
+            var esTardia = fechaActual > deliverable.FechaLimite;
             if (esTardia && !deliverable.PermiteEntregaExtemporanea)
                 return BadRequest("La fecha límite ha pasado. No se permiten entregas extemporáneas (RN-01).");
 
@@ -176,7 +292,7 @@ namespace SigpaBackend.Controllers
             }
 
             deliverable.ArchivoUrl = objectKey;
-            deliverable.FechaEntrega = fechaActual;
+            deliverable.FechaEntrega = fechaActual.UtcDateTime;
             deliverable.Estado = esTardia ? "Entregado Tardío" : "Entregado a Tiempo";
             deliverable.PenalizacionAplicadaPct = esTardia
                 ? deliverable.PenalizacionExtemporaneaPct
@@ -186,7 +302,7 @@ namespace SigpaBackend.Controllers
                 EntregableId = id,
                 EnviadaPor = userId.Value,
                 ArchivoUrl = objectKey,
-                EnviadaAt = fechaActual,
+                EnviadaAt = fechaActual.UtcDateTime,
                 Estado = deliverable.Estado,
                 PenalizacionAplicadaPct = deliverable.PenalizacionAplicadaPct
             });

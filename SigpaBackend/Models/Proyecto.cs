@@ -21,6 +21,8 @@ namespace SigpaBackend.Models
 
         public string Curso { get; set; } = "Ingeniería de requisitos";
 
+        public Guid? CursoId { get; set; }
+
         public int Progreso { get; set; } = 15;
 
         public DateTime? FechaInicio { get; set; }

@@ -5,7 +5,8 @@
 1. Abre el proyecto de Supabase y entra en **SQL Editor**.
 2. Crea una consulta nueva.
 3. Copia todo el contenido de [`schema.sql`](./schema.sql), pégalo y ejecuta la consulta. También actualiza las tablas creadas anteriormente con las columnas nuevas que SIGPA necesita.
-4. En **Table Editor**, confirma que existan `usuarios`, `proyectos`, `proyecto_integrantes` y `entregables`.
+4. Ejecuta [`extension_academica.sql`](./extension_academica.sql) después del esquema base. Crea cursos, matrículas, notificaciones y las restricciones de equipo/entregas/tareas.
+5. En **Table Editor**, confirma que existan `usuarios`, `cursos`, `matriculas`, `proyectos`, `proyecto_integrantes`, `entregables`, `tareas_kanban` y `notificaciones`.
 
 El script activa Row Level Security. Los usuarios solo leen su perfil; estudiantes crean y consultan sus propios proyectos; profesores, coordinadores y administradores pueden consultar y revisar proyectos. La contraseña y la clave `service_role` no forman parte del SQL.
 
@@ -35,7 +36,16 @@ where lower(correo_institucional) in ('estudiante@sigpa.edu', 'profesor@sigpa.ed
 
 El resultado debe contener ambos correos, con roles `Estudiante` y `Profesor`.
 
-## 3. Configurar la aplicación local
+## 3. Registrar asignaturas y matrículas
+
+Antes de crear proyectos, el personal administrativo debe registrar cada
+asignatura en `public.cursos` con su código, nombre y `docente_id`, y crear
+registros en `public.matriculas` para los estudiantes inscritos con estado
+`Activa`. `docente_id` debe corresponder a un perfil con rol `Profesor`.
+La API solo ofrece al estudiante sus matrículas activas; no se deben conceder
+permisos de lectura directa de esas tablas al navegador.
+
+## 4. Configurar la aplicación local
 
 En `sigpa-frontend/.env`, configura la URL y la clave **publishable** del proyecto:
 
@@ -57,11 +67,13 @@ dotnet user-secrets set "Supabase:ServiceKey" "<service-role-key>"
 
 Obtén la cadena de conexión desde **Project Settings > Database > Connect**. Para conexiones locales, usa el hostname/puerto que muestra el panel y la contraseña de base de datos actual; no sustituyas el hostname ni reutilices la clave `service_role` como contraseña de PostgreSQL.
 
-## 4. Probar
+## 5. Probar
 
 1. Inicia el frontend y entra con cada cuenta de Supabase.
-2. Como estudiante, registra un proyecto y confirma que aparece en `public.proyectos`.
+2. Como estudiante con matrícula activa, registra un proyecto, invita compañeros disponibles y confirma las filas en `public.proyectos`, `public.proyecto_integrantes` y `public.notificaciones`.
 3. Como profesor, revisa el proyecto y cambia su estado.
-4. Cierra sesión y vuelve a entrar para comprobar que ambos cambios persisten.
+4. Configura un hito pendiente y verifica que el estudiante pueda enviar un PDF/ZIP o enlace; prueba también el rechazo fuera de plazo.
+5. Crea, asigna, mueve, edita y elimina tareas desde el tablero Kanban.
+6. Cierra sesión y vuelve a entrar para comprobar que los cambios persisten.
 
 Si el login autentica al usuario pero dice que no encuentra su perfil, ejecuta `bootstrap_profiles.sql`. Si aparece un error de columna o esquema al cargar proyectos, vuelve a ejecutar `schema.sql` completo y espera a que se recargue el esquema PostgREST. Si el login muestra un error de credenciales, confirma el usuario y la contraseña en Supabase Authentication.

@@ -7,18 +7,20 @@ diseño implementable. El repositorio parte de React 18/Vite, una API ASP.NET
 Core 10, PostgreSQL mediante Npgsql y autenticación Supabase. El esquema actual
 ya contiene usuarios, proyectos, integrantes, entregables, criterios de rúbrica
 y tareas Kanban. `SigpaBackend/Supabase/extension_academica.sql` añade, sin
-reemplazar el esquema existente, objetivos específicos, invitaciones y reglas
-de equipo, riesgos, entregas tardías, rúbricas estrictas, calificaciones,
-auditoría append-only y un bucket privado de entregables. El frontend existente
-continúa usando Supabase directamente para el dashboard y la API se conserva
-como superficie complementaria.
+reemplazar el esquema existente, cursos y matrículas activas, notificaciones,
+objetivos específicos, invitaciones y reglas de equipo, riesgos, entregas
+tardías, rúbricas estrictas, calificaciones, auditoría append-only y un bucket
+privado de entregables. Las mutaciones de proyectos, entregas y Kanban se
+validan en la API; Supabase se conserva para autenticación y lectura del
+dashboard.
 
-Este modelo sigue siendo gradual: aún no existen matrículas y asignaturas
-normalizadas enlazadas a un periodo, sincronización LMS efectiva, exportaciones
-asíncronas ni un worker de notificaciones. RN-02 usa por ahora el valor heredado
-`proyectos.curso`; la migración protege las nuevas operaciones sin reescribir
-los proyectos históricos. La extensión SQL no ha sido aplicada a una instancia
-remota y debe probarse en staging con copia de seguridad antes de producción.
+Este modelo sigue siendo gradual: asignaturas y matrículas aún no están
+enlazadas a periodos, y faltan sincronización LMS efectiva, exportaciones
+asíncronas y un worker de correo. RN-02 usa `curso_id` y matrícula activa en
+proyectos nuevos; se conserva `proyectos.curso` para proyectos históricos. Las
+notificaciones de proyecto quedan persistidas y disponibles por API. La
+extensión SQL debe aplicarse y probarse en staging con copia de seguridad antes
+de producción.
 
 ## 2. Arquitectura propuesta
 
@@ -106,10 +108,9 @@ conservar historial.
 
 Cada proyecto corresponde a un equipo de una asignatura. El equipo incluye al
 creador como integrante aceptado; su creación y membresía inicial se hacen en
-una sola transacción. Un trigger diferible o un servicio de dominio con bloqueo
-de fila (`SELECT ... FOR UPDATE` del proyecto) impide más de cinco integrantes
-aceptados y evita carreras al aceptar invitaciones. El rango permitido se
-valida al confirmar el equipo, con mínimo 1 y máximo 5 estudiantes matriculados.
+una sola transacción. Se invita entre 1 y 5 compañeros matriculados (hasta 6
+personas contando al creador), y una pertenencia activa a otro proyecto bloquea
+una segunda asignación.
 
 ### 3.3 Hitos, archivos y entregas
 
@@ -232,11 +233,18 @@ para mutaciones concurrentes de Kanban, propuestas y evaluación. Los endpoints
 indicados requieren JWT salvo que se señale expresamente.
 
 La implementación actual expone rutas `/api/...` sin versión en URL. Están
-implementadas `POST/GET /api/proyectos`, `GET /api/proyectos/mis-proyectos`,
+implementadas `POST/GET /api/proyectos` y el alias `POST /api/projects`,
+`GET /api/proyectos/mis-proyectos`,
 `GET /api/proyectos/{id}`, `GET /api/proyectos/{id}/objetivos`,
 `POST /api/proyectos/{id}/correcciones`, operaciones de
 `integrantes`/`invitaciones`, `PATCH /api/proyectos/{id}/evaluar`,
 `GET/POST /api/proyectos/{id}/tareas`, `PATCH /api/tareas/{id}/estado`,
+`GET/POST /api/projects/{id}/tasks`, `PUT/DELETE /api/kanban/tasks/{id}`,
+`GET /api/projects/{id}/members`,
+`GET /api/projects/{id}/milestones`,
+`POST /api/projects/{id}/deliverables`,
+`GET /api/cursos/mis-matriculas`,
+`GET /api/cursos/{id}/companeros`, `GET /api/notificaciones`,
 `POST /api/entregables`, `POST /api/entregables/{id}/entregar`,
 `POST/GET /api/entregables/{id}/archivo`,
 `POST /api/entregables/{id}/rubrica`, operaciones de

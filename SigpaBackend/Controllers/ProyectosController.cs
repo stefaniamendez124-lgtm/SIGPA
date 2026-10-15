@@ -105,64 +105,146 @@ namespace SigpaBackend.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> CrearProyecto([FromBody] Proyecto proyecto)
+        [HttpPost("/api/projects")]
+        public async Task<IActionResult> CrearProyecto([FromBody] CrearProyectoDto request)
         {
             var userId = UserAccessService.GetUserId(User);
             if (userId is null) return Unauthorized();
             if (!await _access.HasRoleAsync(userId.Value, "Estudiante"))
                 return Forbid();
 
-            proyecto.Id = Guid.NewGuid();
-            proyecto.CreadorId = userId.Value;
-            proyecto.Estado = "Pendiente";
-            proyecto.Curso = string.IsNullOrWhiteSpace(proyecto.Curso) ? "Ingeniería de requisitos" : proyecto.Curso;
-            proyecto.Progreso = 0;
-            proyecto.ComentariosEvaluacion = null;
-            proyecto.Problema = string.IsNullOrWhiteSpace(proyecto.Problema)
-                ? proyecto.Descripcion.Trim()
-                : proyecto.Problema.Trim();
-            proyecto.ObjetivoGeneral = proyecto.ObjetivoGeneral.Trim();
-
-            if (string.IsNullOrWhiteSpace(proyecto.Nombre) ||
-                string.IsNullOrWhiteSpace(proyecto.Problema) ||
-                string.IsNullOrWhiteSpace(proyecto.ObjetivoGeneral) ||
-                proyecto.ObjetivosEspecificos is null ||
-                proyecto.ObjetivosEspecificos.Count == 0 ||
-                proyecto.ObjetivosEspecificos.Any(string.IsNullOrWhiteSpace))
+            if (string.IsNullOrWhiteSpace(request.Nombre) ||
+                string.IsNullOrWhiteSpace(request.Problema) ||
+                string.IsNullOrWhiteSpace(request.ObjetivoGeneral) ||
+                request.ObjetivosEspecificos is null ||
+                request.ObjetivosEspecificos.Count == 0 ||
+                request.ObjetivosEspecificos.Any(string.IsNullOrWhiteSpace))
             {
                 return BadRequest("El título, planteamiento del problema, objetivo general y al menos un objetivo específico son obligatorios.");
             }
-            if (proyecto.ObjetivosEspecificos.Count > 20)
+            if (request.ObjetivosEspecificos.Count > 20)
                 return BadRequest("Se permiten hasta 20 objetivos específicos por propuesta.");
-            if (proyecto.ObjetivosEspecificos.Any(objective => objective.Trim().Length > 2000))
+            if (request.ObjetivosEspecificos.Any(objective => objective.Trim().Length > 2000))
                 return BadRequest("Cada objetivo específico debe tener como máximo 2000 caracteres.");
+            if (request.CursoId == Guid.Empty)
+                return BadRequest("Selecciona una asignatura con matrícula activa.");
+            if (request.IntegrantesIds is null || request.IntegrantesIds.Count is < 1 or > 5 ||
+                request.IntegrantesIds.Any(id => id == Guid.Empty) ||
+                request.IntegrantesIds.Distinct().Count() != request.IntegrantesIds.Count ||
+                request.IntegrantesIds.Contains(userId.Value))
+            {
+                return BadRequest("Invita entre 1 y 5 compañeros; el equipo puede tener hasta 6 integrantes contando al creador (RN-02).");
+            }
 
-            var now = DateTime.UtcNow;
-            proyecto.FechaInicio ??= now;
-            proyecto.FechaFin ??= now.AddDays(14);
-            proyecto.FechaEntrega ??= DateOnly.FromDateTime(proyecto.FechaFin.Value);
+            var course = await _context.Cursos
+                .FirstOrDefaultAsync(item => item.Id == request.CursoId && item.Activo);
+            if (course is null) return BadRequest("La asignatura seleccionada no está activa.");
+            var courseTeacherId = course.DocenteId;
+            if (courseTeacherId is null ||
+                !await _context.Usuarios.AnyAsync(user =>
+                    user.Id == courseTeacherId.Value && user.Rol == "Profesor"))
+                return Conflict("La asignatura no tiene un docente responsable configurado para recibir la notificación.");
 
             await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
-            _context.Proyectos.Add(proyecto);
+            var memberIds = request.IntegrantesIds.Append(userId.Value).ToArray();
+            var enrolledIds = await _context.Matriculas
+                .Where(enrollment => enrollment.CursoId == course.Id &&
+                                     enrollment.Estado == "Activa" &&
+                                     memberIds.Contains(enrollment.EstudianteId))
+                .Join(_context.Usuarios.Where(student => student.Rol == "Estudiante"),
+                    enrollment => enrollment.EstudianteId,
+                    student => student.Id,
+                    (enrollment, student) => enrollment.EstudianteId)
+                .ToListAsync();
+            if (enrolledIds.Count != memberIds.Length)
+                return Conflict("El estudiante invitado no tiene matrícula activa en la asignatura seleccionada (RN-02).");
+
+            var assignedIds = await _context.ProyectoIntegrantes
+                .Where(member => memberIds.Contains(member.UsuarioId) &&
+                                 (member.Estado == "Invitado" || member.Estado == "Aceptado"))
+                .Select(member => member.UsuarioId)
+                .Distinct()
+                .ToListAsync();
+            if (assignedIds.Count > 0)
+            {
+                var conflictingStudent = await _context.Usuarios
+                    .Where(student => assignedIds.Contains(student.Id))
+                    .Select(student => student.NombreCompleto)
+                    .FirstOrDefaultAsync();
+                return Conflict($"El estudiante {conflictingStudent ?? assignedIds[0].ToString()} pertenece a otro grupo o curso (RN-02).");
+            }
+
+            var now = DateTime.UtcNow;
+            var project = new Proyecto
+            {
+                Id = Guid.NewGuid(),
+                Nombre = request.Nombre.Trim(),
+                Descripcion = request.Problema.Trim(),
+                Problema = request.Problema.Trim(),
+                ObjetivoGeneral = request.ObjetivoGeneral.Trim(),
+                Curso = course.Nombre,
+                CursoId = course.Id,
+                Estado = "Pendiente de Revisión",
+                Progreso = 0,
+                CreadorId = userId.Value,
+                FechaInicio = now,
+                FechaFin = now.AddDays(14),
+                FechaEntrega = DateOnly.FromDateTime(now.AddDays(14))
+            };
+
+            _context.Proyectos.Add(project);
             await _context.SaveChangesAsync();
 
             _context.ProyectoIntegrantes.Add(new ProyectoIntegrante
             {
-                ProyectoId = proyecto.Id,
+                ProyectoId = project.Id,
                 UsuarioId = userId.Value
             });
-            _context.ObjetivosEspecificos.AddRange(proyecto.ObjetivosEspecificos.Select((objective, index) =>
+            _context.ProyectoIntegrantes.AddRange(request.IntegrantesIds.Select(studentId =>
+                new ProyectoIntegrante
+                {
+                    ProyectoId = project.Id,
+                    UsuarioId = studentId,
+                    Estado = "Invitado",
+                    InvitadoPor = userId.Value
+                }));
+            _context.Notificaciones.Add(new Notificacion
+            {
+                UsuarioId = userId.Value,
+                ProyectoId = project.Id,
+                Tipo = "ProyectoRegistrado",
+                Mensaje = $"Tu proyecto «{project.Nombre}» quedó pendiente de revisión."
+            });
+            _context.ObjetivosEspecificos.AddRange(request.ObjetivosEspecificos.Select((objective, index) =>
                 new ObjetivoEspecifico
                 {
-                    ProyectoId = proyecto.Id,
+                    ProyectoId = project.Id,
                     Descripcion = objective.Trim(),
                     Orden = index + 1
                 }));
-            _audit.Record(userId, "proyecto.creado", "proyecto", proyecto.Id);
+            foreach (var studentId in request.IntegrantesIds)
+            {
+                _context.Notificaciones.Add(new Notificacion
+                {
+                    UsuarioId = studentId,
+                    ProyectoId = project.Id,
+                    Tipo = "InvitacionProyecto",
+                    Mensaje = $"Te invitaron a integrar el proyecto «{project.Nombre}» de {course.Nombre}."
+                });
+            }
+            _context.Notificaciones.Add(new Notificacion
+            {
+                UsuarioId = courseTeacherId.Value,
+                ProyectoId = project.Id,
+                Tipo = "ProyectoPendienteRevision",
+                Mensaje = $"El proyecto «{project.Nombre}» está pendiente de revisión."
+            });
+            _audit.Record(userId, "proyecto.creado", "proyecto", project.Id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
-            return CreatedAtAction(nameof(ObtenerProyectos), new { id = proyecto.Id }, proyecto);
+            project.ObjetivosEspecificos = request.ObjetivosEspecificos.Select(objective => objective.Trim()).ToList();
+            return CreatedAtAction(nameof(ObtenerProyecto), new { id = project.Id }, project);
         }
 
         [HttpGet("{id:guid}/objetivos")]
@@ -177,6 +259,42 @@ namespace SigpaBackend.Controllers
                 .OrderBy(objective => objective.Orden)
                 .ToListAsync();
             return Ok(objectives);
+        }
+
+        [HttpGet("/api/projects/{id:guid}/members")]
+        public async Task<IActionResult> ObtenerIntegrantesActivos(Guid id)
+        {
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+            if (!await _access.CanReadProjectAsync(id, userId.Value)) return NotFound();
+
+            var members = await _context.ProyectoIntegrantes
+                .Where(member => member.ProyectoId == id && member.Estado == "Aceptado")
+                .Join(_context.Usuarios,
+                    member => member.UsuarioId,
+                    student => student.Id,
+                    (member, student) => new
+                    {
+                        id = student.Id,
+                        nombre = student.NombreCompleto,
+                        correo = student.CorreoInstitucional
+                    })
+                .ToListAsync();
+
+            var creatorId = await _context.Proyectos
+                .Where(project => project.Id == id)
+                .Select(project => project.CreadorId)
+                .FirstAsync();
+            if (!members.Any(member => member.id == creatorId))
+            {
+                var creator = await _context.Usuarios
+                    .Where(student => student.Id == creatorId)
+                    .Select(student => new { id = student.Id, nombre = student.NombreCompleto, correo = student.CorreoInstitucional })
+                    .FirstOrDefaultAsync();
+                if (creator is not null) members.Add(creator);
+            }
+
+            return Ok(members);
         }
 
         [HttpPost("{id:guid}/correcciones")]
@@ -238,6 +356,12 @@ namespace SigpaBackend.Controllers
             if (proyecto is null) return NotFound("Proyecto no encontrado.");
             if (proyecto.CreadorId != currentUserId.Value) return Forbid();
             if (request.UsuarioId == Guid.Empty) return BadRequest("El usuario invitado no es válido.");
+            if (proyecto.CursoId is Guid courseId &&
+                !await _context.Matriculas.AnyAsync(enrollment =>
+                    enrollment.CursoId == courseId &&
+                    enrollment.EstudianteId == request.UsuarioId &&
+                    enrollment.Estado == "Activa"))
+                return Conflict("El estudiante no tiene matrícula activa en esta asignatura (RN-02).");
 
             var estudianteValido = await _context.Usuarios
                 .AnyAsync(user => user.Id == request.UsuarioId && user.Rol == "Estudiante");
@@ -254,19 +378,17 @@ namespace SigpaBackend.Controllers
                     pi.ProyectoId == id && pi.UsuarioId == proyecto.CreadorId && pi.Estado == "Aceptado"))
                 cantidadIntegrantes++;
 
-            if (cantidadIntegrantes >= 5)
+            if (cantidadIntegrantes >= 6)
             {
-                return BadRequest("El equipo ya alcanzó el límite máximo de 5 integrantes (RN-02).");
+                return BadRequest("El equipo ya alcanzó el límite máximo de 6 integrantes (RN-02).");
             }
 
-            var yaAsignadoEnCurso = await _context.ProyectoIntegrantes
+            var yaAsignado = await _context.ProyectoIntegrantes
                 .AnyAsync(member => member.UsuarioId == request.UsuarioId &&
-                    _context.Proyectos.Any(otherProject =>
-                        otherProject.Id == member.ProyectoId &&
-                        otherProject.Curso == proyecto.Curso));
-            if (yaAsignadoEnCurso)
+                                    (member.Estado == "Invitado" || member.Estado == "Aceptado"));
+            if (yaAsignado)
             {
-                return Conflict("El estudiante ya está asignado a un equipo de esta asignatura (RN-02).");
+                return Conflict("El estudiante pertenece a otro grupo o curso (RN-02).");
             }
 
             var nuevoIntegrante = new ProyectoIntegrante
@@ -278,6 +400,13 @@ namespace SigpaBackend.Controllers
             };
 
             _context.ProyectoIntegrantes.Add(nuevoIntegrante);
+            _context.Notificaciones.Add(new Notificacion
+            {
+                UsuarioId = request.UsuarioId,
+                ProyectoId = id,
+                Tipo = "InvitacionProyecto",
+                Mensaje = $"Te invitaron a integrar el proyecto «{proyecto.Nombre}»."
+            });
             _audit.Record(currentUserId, "equipo.integrante_agregado", "proyecto", id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -294,6 +423,12 @@ namespace SigpaBackend.Controllers
             var project = await _context.Proyectos.FindAsync(id);
             if (project is null) return NotFound("Proyecto no encontrado.");
             if (project.CreadorId != currentUserId.Value) return Forbid();
+            if (project.CursoId is Guid courseId &&
+                !await _context.Matriculas.AnyAsync(enrollment =>
+                    enrollment.CursoId == courseId &&
+                    enrollment.EstudianteId == request.UsuarioId &&
+                    enrollment.Estado == "Activa"))
+                return Conflict("El estudiante no tiene matrícula activa en esta asignatura (RN-02).");
 
             var isStudent = await _context.Usuarios.AnyAsync(user =>
                 user.Id == request.UsuarioId && user.Rol == "Estudiante");
@@ -306,16 +441,13 @@ namespace SigpaBackend.Controllers
                     member.ProyectoId == id && member.UsuarioId == project.CreadorId &&
                     member.Estado == "Aceptado"))
                 memberCount++;
-            if (memberCount >= 5) return Conflict("El equipo ya alcanzó el límite máximo de 5 integrantes (RN-02).");
+            if (memberCount >= 6) return Conflict("El equipo ya alcanzó el límite máximo de 6 integrantes (RN-02).");
 
             var assignedToCourse = await _context.ProyectoIntegrantes.AnyAsync(member =>
                 member.UsuarioId == request.UsuarioId &&
-                member.Estado != "Rechazado" &&
-                member.Estado != "Retirado" &&
-                _context.Proyectos.Any(otherProject =>
-                    otherProject.Id == member.ProyectoId && otherProject.Curso == project.Curso));
+                (member.Estado == "Invitado" || member.Estado == "Aceptado"));
             if (assignedToCourse)
-                return Conflict("El estudiante ya está asignado o tiene una invitación activa en esta asignatura (RN-02).");
+                return Conflict("El estudiante pertenece a otro grupo o curso (RN-02).");
 
             var invitation = new ProyectoIntegrante
             {
@@ -325,6 +457,13 @@ namespace SigpaBackend.Controllers
                 InvitadoPor = currentUserId.Value
             };
             _context.ProyectoIntegrantes.Add(invitation);
+            _context.Notificaciones.Add(new Notificacion
+            {
+                UsuarioId = request.UsuarioId,
+                ProyectoId = id,
+                Tipo = "InvitacionProyecto",
+                Mensaje = $"Te invitaron a integrar el proyecto «{project.Nombre}»."
+            });
             _audit.Record(currentUserId, "equipo.invitacion_enviada", "proyecto", id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -348,15 +487,20 @@ namespace SigpaBackend.Controllers
                 member.UsuarioId == currentUserId.Value &&
                 member.Estado == "Invitado");
             if (invitation is null) return NotFound("No existe una invitación pendiente para este proyecto.");
+            if (project.CursoId is Guid courseId &&
+                !await _context.Matriculas.AnyAsync(enrollment =>
+                    enrollment.CursoId == courseId &&
+                    enrollment.EstudianteId == currentUserId.Value &&
+                    enrollment.Estado == "Activa"))
+                return Conflict("Tu matrícula activa en esta asignatura ya no está vigente (RN-02).");
 
             var assignedToOtherProject = await _context.ProyectoIntegrantes.AnyAsync(member =>
                 member.UsuarioId == currentUserId.Value &&
                 member.ProyectoId != id &&
                 (member.Estado == "Invitado" || member.Estado == "Aceptado") &&
-                _context.Proyectos.Any(otherProject =>
-                    otherProject.Id == member.ProyectoId && otherProject.Curso == project.Curso));
+                _context.Proyectos.Any(otherProject => otherProject.Id == member.ProyectoId));
             if (assignedToOtherProject)
-                return Conflict("Ya perteneces a otro equipo de esta asignatura (RN-02).");
+                return Conflict("Ya perteneces a otro grupo o curso (RN-02).");
 
             var memberCount = await _context.ProyectoIntegrantes.CountAsync(member =>
                 member.ProyectoId == id &&
@@ -365,8 +509,8 @@ namespace SigpaBackend.Controllers
                     member.ProyectoId == id && member.UsuarioId == project.CreadorId &&
                     member.Estado == "Aceptado"))
                 memberCount++;
-            if (memberCount > 5)
-                return Conflict("El equipo ya alcanzó el límite máximo de 5 integrantes (RN-02).");
+            if (memberCount > 6)
+                return Conflict("El equipo ya alcanzó el límite máximo de 6 integrantes (RN-02).");
 
             invitation.Estado = "Aceptado";
             invitation.RespondidoAt = DateTime.UtcNow;
@@ -413,7 +557,7 @@ namespace SigpaBackend.Controllers
                 return BadRequest("Estado de evaluación no válido. Solo se permite 'Aprobado' o 'Rechazado'.");
             }
 
-            if (proyecto.Estado is not ("Pendiente" or "En revisión"))
+            if (proyecto.Estado is not ("Pendiente" or "Pendiente de Revisión" or "En revisión"))
             {
                 return Conflict("La propuesta ya fue dictaminada.");
             }

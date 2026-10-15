@@ -13,7 +13,7 @@ create table if not exists public.proyectos (
   descripcion text not null default '',
   curso text not null default 'Ingeniería de requisitos',
   estado text not null default 'Pendiente'
-    check (estado in ('Pendiente', 'En revisión', 'Aprobado', 'Rechazado', 'Entregado', 'En progreso')),
+    check (estado in ('Pendiente', 'Pendiente de Revisión', 'En revisión', 'Aprobado', 'Rechazado', 'Entregado', 'En progreso')),
   progreso integer not null default 15 check (progreso between 0 and 100),
   fecha_inicio timestamptz not null default now(),
   fecha_fin timestamptz not null default (now() + interval '14 days'),
@@ -42,8 +42,12 @@ create table if not exists public.proyecto_integrantes (
   proyecto_id uuid not null references public.proyectos(id) on delete cascade,
   usuario_id uuid not null references public.usuarios(id) on delete cascade,
   created_at timestamptz not null default now(),
+  estado text not null default 'Aceptado',
   unique (proyecto_id, usuario_id)
 );
+
+alter table public.proyecto_integrantes
+  add column if not exists estado text not null default 'Aceptado';
 
 create table if not exists public.entregables (
   id uuid primary key default gen_random_uuid(),
@@ -125,11 +129,30 @@ create policy "Users can read their own profile"
 on public.usuarios for select to authenticated
 using (id = (select auth.uid()));
 
+create or replace function public.es_integrante_aceptado(p_proyecto_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.proyecto_integrantes pi
+    where pi.proyecto_id = p_proyecto_id
+      and pi.usuario_id = (select auth.uid())
+      and pi.estado = 'Aceptado'
+  );
+$$;
+
+revoke all on function public.es_integrante_aceptado(uuid) from public, anon;
+grant execute on function public.es_integrante_aceptado(uuid) to authenticated;
+
 drop policy if exists "Students and staff can read projects" on public.proyectos;
 create policy "Students and staff can read projects"
 on public.proyectos for select to authenticated
 using (
   creador_id = (select auth.uid())
+  or public.es_integrante_aceptado(proyectos.id)
   or exists (
     select 1 from public.usuarios u
     where u.id = (select auth.uid())

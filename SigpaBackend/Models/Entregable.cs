@@ -11,7 +11,7 @@ namespace SigpaBackend.Models
         public string Titulo { get; set; } = string.Empty;
         public string Descripcion { get; set; } = string.Empty;
         public decimal PorcentajeNota { get; set; }
-        public DateOnly FechaLimite { get; set; }
+        public DateTimeOffset FechaLimite { get; set; }
 
         // Evidencia del Estudiante (REQ-6 y REQ-7)
         public string ArchivoUrl { get; set; } = string.Empty;
