@@ -1,7 +1,10 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using SigpaBackend.Data;
+using SigpaBackend.Repositories;
+using SigpaBackend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,10 +21,18 @@ builder.Services.AddCors(options =>
     });
 });
 
-var connectionString =
-    builder.Configuration.GetConnectionString("DefaultConnection") ??
-    Environment.GetEnvironmentVariable("DATABASE_URL") ??
-    string.Empty;
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
+}
+
+if (string.IsNullOrWhiteSpace(connectionString))
+{
+    throw new InvalidOperationException(
+        "No se configuró la conexión a PostgreSQL. Define ConnectionStrings:DefaultConnection " +
+        "con dotnet user-secrets o la variable de entorno DATABASE_URL antes de iniciar SigpaBackend.");
+}
 
 builder.Services.AddDbContext<SigpaContext>(options =>
     options.UseNpgsql(connectionString)
@@ -48,9 +59,23 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-builder.Services.AddScoped<SigpaBackend.Services.UserAccessService>();
-builder.Services.AddScoped<SigpaBackend.Services.AuditService>();
-builder.Services.AddHttpClient<SigpaBackend.Services.SupabaseStorageService>();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("Coordinador", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.AddRequirements(new CoordinadorRequirement());
+    });
+});
+
+builder.Services.AddScoped<UserAccessService>();
+builder.Services.AddScoped<AuditService>();
+builder.Services.AddScoped<IAuthorizationHandler, CoordinadorAuthorizationHandler>();
+builder.Services.AddScoped<IUsuarioRepository, UsuarioRepository>();
+builder.Services.AddScoped<IUsuarioService, UsuarioService>();
+builder.Services.AddScoped<IWelcomeEmailService, SmtpWelcomeEmailService>();
+builder.Services.AddHttpClient<ISupabaseAdminUserService, SupabaseAdminUserService>();
+builder.Services.AddHttpClient<SupabaseStorageService>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -69,6 +94,8 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 
 app.UseAuthentication();
+app.UseMiddleware<PostgresSchemaErrorMiddleware>();
+app.UseMiddleware<ActiveAccountMiddleware>();
 app.UseAuthorization();
 
 app.MapControllers();

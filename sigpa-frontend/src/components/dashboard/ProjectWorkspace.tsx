@@ -1,12 +1,18 @@
 import { ChangeEvent, CSSProperties, DragEvent, FormEvent, useEffect, useState } from 'react';
 import { apiFetch, getApiError } from '../../utility/api';
+import { TeacherProjectPanel } from './TeacherProjectPanel';
 
 type Milestone = {
   id: string;
   titulo: string;
+  descripcion: string;
   fechaLimite: string;
   estado: string;
+  fechaEntrega: string | null;
   permiteEntregaExtemporanea: boolean;
+  porcentajeNota: number;
+  penalizacionExtemporaneaPct: number;
+  archivoUrl: string;
 };
 
 type TeamMember = {
@@ -31,8 +37,34 @@ type TaskForm = {
 };
 
 type EditableTaskForm = TaskForm & { estado: KanbanTask['estado'] };
+type ProjectRisk = {
+  id: string;
+  titulo: string;
+  descripcion: string;
+  severidad: 'Baja' | 'Media' | 'Alta' | 'Crítica';
+  estado: string;
+  createdAt: string;
+  resueltoAt: string | null;
+};
+type ProjectGrade = {
+  id: string;
+  entregableId: string;
+  puntajeFinal: number;
+  observacionGeneral: string;
+  publicada: boolean;
+  evaluadaAt: string;
+  publicadaAt: string | null;
+  criterios: Array<{
+    criterio: string;
+    puntajeObtenido: number;
+    observacion: string;
+    nivel: string;
+    descripcionNivel: string;
+  }>;
+};
 
 const columns: KanbanTask['estado'][] = ['Por Hacer', 'En Proceso', 'Hecho'];
+const riskSeverities: ProjectRisk['severidad'][] = ['Baja', 'Media', 'Alta', 'Crítica'];
 const maxFileSize = 25 * 1024 * 1024;
 const inputStyle: CSSProperties = {
   boxSizing: 'border-box',
@@ -48,10 +80,12 @@ function emptyTaskForm(): TaskForm {
   return { titulo: '', descripcion: '', responsableId: '', fechaVencimiento: '' };
 }
 
-export function ProjectWorkspace({ projectId }: { projectId: string }) {
+export function ProjectWorkspace({ projectId, mode = 'student' }: { projectId: string; mode?: 'student' | 'teacher' }) {
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [tasks, setTasks] = useState<KanbanTask[]>([]);
+  const [risks, setRisks] = useState<ProjectRisk[]>([]);
+  const [grades, setGrades] = useState<ProjectGrade[]>([]);
   const [selectedMilestone, setSelectedMilestone] = useState('');
   const [evidenceType, setEvidenceType] = useState<'file' | 'url'>('file');
   const [file, setFile] = useState<File | null>(null);
@@ -59,6 +93,9 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
   const [taskForm, setTaskForm] = useState<TaskForm>(emptyTaskForm);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [editingTask, setEditingTask] = useState<EditableTaskForm>({ ...emptyTaskForm(), estado: 'Por Hacer' });
+  const [riskTitle, setRiskTitle] = useState('');
+  const [riskDescription, setRiskDescription] = useState('');
+  const [riskSeverity, setRiskSeverity] = useState<ProjectRisk['severidad']>('Media');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -68,22 +105,28 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const [milestonesResponse, membersResponse, tasksResponse] = await Promise.all([
+      const [milestonesResponse, membersResponse, tasksResponse, risksResponse, gradesResponse] = await Promise.all([
         apiFetch(`/api/projects/${projectId}/milestones`),
         apiFetch(`/api/projects/${projectId}/members`),
         apiFetch(`/api/projects/${projectId}/tasks`),
+        apiFetch(`/api/proyectos/${projectId}/riesgos`),
+        apiFetch(`/api/proyectos/${projectId}/calificaciones`),
       ]);
-      for (const response of [milestonesResponse, membersResponse, tasksResponse]) {
+      for (const response of [milestonesResponse, membersResponse, tasksResponse, risksResponse, gradesResponse]) {
         if (!response.ok) throw new Error(await getApiError(response));
       }
-      const [milestoneData, memberData, taskData] = await Promise.all([
+      const [milestoneData, memberData, taskData, riskData, gradeData] = await Promise.all([
         milestonesResponse.json() as Promise<Milestone[]>,
         membersResponse.json() as Promise<TeamMember[]>,
         tasksResponse.json() as Promise<KanbanTask[]>,
+        risksResponse.json() as Promise<ProjectRisk[]>,
+        gradesResponse.json() as Promise<ProjectGrade[]>,
       ]);
       setMilestones(milestoneData);
       setMembers(memberData);
       setTasks(taskData);
+      setRisks(riskData);
+      setGrades(gradeData);
       setSelectedMilestone((current) =>
         milestoneData.some((item) => item.id === current && item.estado === 'Pendiente')
           ? current
@@ -227,6 +270,61 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
     }
   };
 
+  const submitRisk = async (event: FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setSaving(true);
+    try {
+      const response = await apiFetch(`/api/proyectos/${projectId}/riesgos`, {
+        method: 'POST',
+        body: JSON.stringify({
+          titulo: riskTitle.trim(),
+          descripcion: riskDescription.trim(),
+          severidad: riskSeverity,
+        }),
+      });
+      if (!response.ok) throw new Error(await getApiError(response));
+      setRiskTitle('');
+      setRiskDescription('');
+      setRiskSeverity('Media');
+      await loadWorkspace();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'No se pudo registrar el riesgo.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const resolveRisk = async (riskId: string) => {
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/proyectos/${projectId}/riesgos/${riskId}/resolver`, { method: 'PATCH' });
+      if (!response.ok) throw new Error(await getApiError(response));
+      await loadWorkspace();
+    } catch (resolveError) {
+      setError(resolveError instanceof Error ? resolveError.message : 'No se pudo resolver el riesgo.');
+    }
+  };
+
+  const openSubmission = async (milestoneId: string) => {
+    const downloadWindow = window.open('about:blank', '_blank');
+    if (!downloadWindow) {
+      setError('El navegador bloqueó la ventana de descarga. Habilita las ventanas emergentes e inténtalo de nuevo.');
+      return;
+    }
+    downloadWindow.opener = null;
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/entregables/${milestoneId}/archivo`);
+      if (!response.ok) throw new Error(await getApiError(response));
+      const result = await response.json() as { url: string };
+      downloadWindow.location.href = result.url;
+    } catch (downloadError) {
+      downloadWindow.close();
+      setError(downloadError instanceof Error ? downloadError.message : 'No se pudo abrir la entrega.');
+    }
+  };
+
   if (loading) return <p role="status">Cargando entregas y tablero...</p>;
 
   return (
@@ -234,7 +332,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
       {error && <p role="alert" style={{ color: '#fecaca' }}>{error}</p>}
       {message && <p role="status" style={{ color: '#bbf7d0' }}>{message}</p>}
 
-      <section aria-labelledby={`deliverables-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
+      {mode === 'student' && <section aria-labelledby={`deliverables-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
         <h4 id={`deliverables-${projectId}`} style={{ margin: '0 0 12px' }}>Hitos y entregas</h4>
         <form onSubmit={submitDeliverable} style={{ display: 'grid', gap: '10px' }}>
           <label>
@@ -284,11 +382,40 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
             {saving ? 'Enviando...' : 'Enviar entrega'}
           </button>
         </form>
-      </section>
+      </section>}
+
+      {mode === 'teacher' && (
+        <>
+          <section aria-labelledby={`received-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
+            <h4 id={`received-${projectId}`} style={{ margin: '0 0 12px' }}>Entregas recibidas</h4>
+            {milestones.length === 0 ? <p>Aún no hay hitos en este proyecto.</p> : (
+              <ul style={{ display: 'grid', gap: '8px' }}>
+                {milestones.map((milestone) => (
+                  <li key={milestone.id}>
+                    <strong>{milestone.titulo}</strong> — {milestone.estado}
+                    {milestone.fechaEntrega && ` · ${new Date(milestone.fechaEntrega).toLocaleString('es-ES')}`}
+                    {milestone.fechaEntrega && (
+                      <button type="button" onClick={() => void openSubmission(milestone.id)} style={{ marginLeft: '10px' }}>
+                        Abrir evidencia
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <TeacherProjectPanel
+            projectId={projectId}
+            milestones={milestones}
+            evaluatedMilestoneIds={grades.map((grade) => grade.entregableId)}
+            onRefresh={loadWorkspace}
+          />
+        </>
+      )}
 
       <section aria-labelledby={`kanban-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
         <h4 id={`kanban-${projectId}`} style={{ margin: '0 0 12px' }}>Tablero Kanban</h4>
-        <form onSubmit={submitTask} style={{ display: 'grid', gap: '10px', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', marginBottom: '16px' }}>
+        {mode === 'student' && <form onSubmit={submitTask} style={{ display: 'grid', gap: '10px', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', marginBottom: '16px' }}>
           <label>
             Título
             <input required value={taskForm.titulo} onChange={(event) => setTaskForm({ ...taskForm, titulo: event.target.value })} style={inputStyle} />
@@ -309,7 +436,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
             <input type="date" value={taskForm.fechaVencimiento} onChange={(event) => setTaskForm({ ...taskForm, fechaVencimiento: event.target.value })} style={inputStyle} />
           </label>
           <button disabled={saving || members.length === 0} type="submit">Crear tarea</button>
-        </form>
+        </form>}
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
           {columns.map((column) => (
@@ -320,7 +447,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
                 const isEditing = editingTaskId === task.id;
                 return (
                   <article key={task.id} style={{ marginBottom: '10px', padding: '12px', borderRadius: '8px', background: '#1e293b' }}>
-                    {isEditing ? (
+                    {mode === 'student' && isEditing ? (
                       <form onSubmit={(event) => { event.preventDefault(); void saveTask(task, editingTask); }} style={{ display: 'grid', gap: '8px' }}>
                         <label>Título<input required value={editingTask.titulo} onChange={(event) => setEditingTask({ ...editingTask, titulo: event.target.value })} style={inputStyle} /></label>
                         <label>Descripción<input value={editingTask.descripcion} onChange={(event) => setEditingTask({ ...editingTask, descripcion: event.target.value })} style={inputStyle} /></label>
@@ -340,7 +467,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
                         {task.descripcion && <p>{task.descripcion}</p>}
                         <p>Responsable: {responsible}</p>
                         <p>Compromiso: {task.fechaVencimiento ? new Date(task.fechaVencimiento).toLocaleDateString('es-ES') : 'Sin fecha'}</p>
-                        <label>
+                        {mode === 'student' && <label>
                           Mover tarea
                           <select
                             value={task.estado}
@@ -349,8 +476,8 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
                           >
                             {columns.map((status) => <option key={status}>{status}</option>)}
                           </select>
-                        </label>
-                        <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+                        </label>}
+                        {mode === 'student' && <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
                           <button type="button" onClick={() => {
                             setEditingTaskId(task.id);
                             setEditingTask({
@@ -362,15 +489,87 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
                             });
                           }}>Editar</button>
                           <button type="button" onClick={() => void deleteTask(task.id)}>Eliminar</button>
-                        </div>
+                        </div>}
                       </>
                     )}
                   </article>
                 );
               })}
             </section>
+
           ))}
         </div>
+      </section>
+
+      <section aria-labelledby={`grades-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
+        <h4 id={`grades-${projectId}`} style={{ margin: '0 0 12px' }}>Calificaciones y retroalimentación</h4>
+        {grades.length === 0 ? (
+          <p role="status" style={{ color: '#94a3b8' }}>Aún no hay calificaciones publicadas.</p>
+        ) : (
+          <div style={{ display: 'grid', gap: '12px' }}>
+            {grades.map((grade) => (
+              <article key={grade.id} style={{ padding: '14px', borderRadius: '8px', background: '#0f172a' }}>
+                <strong>Nota: {grade.puntajeFinal.toFixed(2)} / 100</strong>
+                <p style={{ whiteSpace: 'pre-wrap' }}>{grade.observacionGeneral || 'Sin observación general.'}</p>
+                <ul>
+                  {grade.criterios.map((criterion, index) => (
+                    <li key={`${grade.id}-${index}`}>
+                      <strong>{criterion.criterio}</strong>: {criterion.nivel} ({criterion.puntajeObtenido})
+                      {criterion.observacion && ` — ${criterion.observacion}`}
+                    </li>
+                  ))}
+                </ul>
+                <time dateTime={grade.publicadaAt ?? grade.evaluadaAt}>
+                  {grade.publicadaAt
+                    ? `Publicada ${new Date(grade.publicadaAt).toLocaleString('es-ES')}`
+                    : 'Evaluación en borrador, visible solo para personal docente'}
+                </time>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby={`risks-${projectId}`} style={{ borderTop: '1px solid #334155', paddingTop: '16px' }}>
+        <h4 id={`risks-${projectId}`} style={{ margin: '0 0 12px' }}>Bitácora de riesgos</h4>
+        {mode === 'student' && <form onSubmit={submitRisk} style={{ display: 'grid', gap: '10px', marginBottom: '16px' }}>
+          <label>
+            Riesgo o bloqueo
+            <input required maxLength={200} value={riskTitle} onChange={(event) => setRiskTitle(event.target.value)} style={inputStyle} />
+          </label>
+          <label>
+            Descripción
+            <textarea required maxLength={4000} value={riskDescription} onChange={(event) => setRiskDescription(event.target.value)} style={inputStyle} rows={3} />
+          </label>
+          <label>
+            Severidad
+            <select value={riskSeverity} onChange={(event) => setRiskSeverity(event.target.value as ProjectRisk['severidad'])} style={inputStyle}>
+              {riskSeverities.map((severity) => <option key={severity}>{severity}</option>)}
+            </select>
+          </label>
+          <button disabled={saving} type="submit">{saving ? 'Guardando...' : 'Registrar riesgo'}</button>
+        </form>}
+        {risks.length === 0 ? (
+          <p role="status" style={{ color: '#94a3b8' }}>No se han registrado riesgos para este proyecto.</p>
+        ) : (
+          <div style={{ display: 'grid', gap: '10px' }}>
+            {risks.map((risk) => (
+              <article key={risk.id} style={{ padding: '12px', borderRadius: '8px', background: '#0f172a' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                  <strong>{risk.titulo}</strong>
+                  <span>{risk.severidad} · {risk.estado}</span>
+                </div>
+                <p style={{ whiteSpace: 'pre-wrap' }}>{risk.descripcion}</p>
+                <time dateTime={risk.createdAt}>{new Date(risk.createdAt).toLocaleString('es-ES')}</time>
+                {risk.estado !== 'Resuelto' && (
+                  <button type="button" onClick={() => void resolveRisk(risk.id)} style={{ display: 'block', marginTop: '8px' }}>
+                    Marcar como resuelto
+                  </button>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
       </section>
     </section>
   );

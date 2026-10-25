@@ -21,5 +21,29 @@ namespace SigpaBackend.Models
 
         [Column("fecha_creacion")]
         public DateTime FechaCreacion { get; set; }
+
+        [Column("tipo_documento")]
+        public string? TipoDocumento { get; set; }
+
+        [Column("numero_identificacion")]
+        public string? NumeroIdentificacion { get; set; }
+
+        [Column("codigo_identificacion")]
+        public string? CodigoIdentificacion { get; set; }
+
+        [Column("semestre")]
+        public int? Semestre { get; set; }
+
+        [Column("programa_academico")]
+        public string? ProgramaAcademico { get; set; }
+
+        [Column("departamento_academico")]
+        public string? DepartamentoAcademico { get; set; }
+
+        [Column("activo")]
+        public bool Activo { get; set; } = true;
+
+        [Column("debe_cambiar_contrasena")]
+        public bool DebeCambiarContrasena { get; set; }
     }
 }

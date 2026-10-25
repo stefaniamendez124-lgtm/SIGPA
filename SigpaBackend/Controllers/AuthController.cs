@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using SigpaBackend.Data;
 using SigpaBackend.Models;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using SigpaBackend.Services;
 
 namespace SigpaBackend.Controllers
 {
@@ -15,92 +17,29 @@ namespace SigpaBackend.Controllers
         private readonly SigpaContext _context;
         private readonly IConfiguration _configuration;
         private readonly ILogger<AuthController> _logger;
+        private readonly ISupabaseAdminUserService _supabaseAdmin;
+        private readonly AuditService _audit;
 
         public AuthController(
             SigpaContext context,
             IConfiguration configuration,
-            ILogger<AuthController> logger)
+            ILogger<AuthController> logger,
+            ISupabaseAdminUserService supabaseAdmin,
+            AuditService audit)
         {
             _context = context;
             _configuration = configuration;
             _logger = logger;
+            _supabaseAdmin = supabaseAdmin;
+            _audit = audit;
         }
 
         [HttpPost("registrar")]
         public async Task<IActionResult> RegistrarUsuario([FromBody] RegisterDto request)
         {
-            if (!string.IsNullOrWhiteSpace(request.Rol) &&
-                !string.Equals(request.Rol, "Estudiante", StringComparison.OrdinalIgnoreCase))
-            {
-                return BadRequest("El registro público solo permite crear cuentas de estudiante. Los roles institucionales los asigna un administrador.");
-            }
-
-            try
-            {
-                var supabaseUrl = _configuration["Supabase:Url"] ??
-                                  Environment.GetEnvironmentVariable("SUPABASE_URL");
-                var serviceKey = _configuration["Supabase:ServiceKey"] ??
-                                 Environment.GetEnvironmentVariable("SUPABASE_SERVICE_ROLE_KEY");
-                if (string.IsNullOrWhiteSpace(supabaseUrl) || string.IsNullOrWhiteSpace(serviceKey))
-                    return Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
-                        title: "El registro de cuentas no está configurado.");
-
-                using var httpClient = new HttpClient();
-                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", serviceKey);
-                httpClient.DefaultRequestHeaders.Add("apikey", serviceKey);
-
-                var payload = new
-                {
-                    email = request.Email,
-                    password = request.Password,
-                    email_confirm = true 
-                };
-
-                var jsonPayload = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-                var response = await httpClient.PostAsync($"{supabaseUrl}/auth/v1/admin/users", jsonPayload);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    _logger.LogWarning("Supabase rechazó el registro con estado HTTP {StatusCode}.", response.StatusCode);
-                    return Problem(
-                        statusCode: StatusCodes.Status502BadGateway,
-                        title: "El proveedor de identidad no pudo crear la cuenta.");
-                }
-
-                var responseString = await response.Content.ReadAsStringAsync();
-                var jsonResponse = JsonSerializer.Deserialize<JsonElement>(responseString);
-                var userId = jsonResponse.GetProperty("id").GetString();
-
-                var nuevoUsuario = new Usuario
-                {
-                    Id = Guid.Parse(userId!),
-                    NombreCompleto = request.NombreCompleto,
-                    CorreoInstitucional = request.Email,
-                    Rol = "Estudiante",
-                    FechaCreacion = DateTime.UtcNow
-                };
-
-                var usuarioExistente = await _context.Usuarios.FindAsync(nuevoUsuario.Id);
-                if (usuarioExistente == null)
-                {
-                    _context.Usuarios.Add(nuevoUsuario);
-                }
-                else
-                {
-                    usuarioExistente.NombreCompleto = nuevoUsuario.NombreCompleto;
-                    usuarioExistente.CorreoInstitucional = nuevoUsuario.CorreoInstitucional;
-                    usuarioExistente.Rol = "Estudiante";
-                }
-
-                await _context.SaveChangesAsync();
-
-                return Ok(new { mensaje = "Usuario registrado exitosamente", usuarioId = nuevoUsuario.Id });
-            }
-            catch (Exception exception)
-            {
-                _logger.LogError(exception, "Falló el registro del usuario en SIGPA.");
-                return Problem("No fue posible completar el registro.");
-            }
+            return StatusCode(
+                StatusCodes.Status410Gone,
+                "El autorregistro está deshabilitado. Solicita la creación de cuenta al Coordinador Académico.");
         }
 
         [HttpPost("login")]
@@ -149,6 +88,8 @@ namespace SigpaBackend.Controllers
                 {
                     return Unauthorized("La cuenta no tiene un perfil activo en SIGPA.");
                 }
+                if (!usuarioDb.Activo)
+                    return Unauthorized("La cuenta está deshabilitada. Contacta al Coordinador Académico.");
 
                 return Ok(new 
                 { 
@@ -157,7 +98,8 @@ namespace SigpaBackend.Controllers
                     Usuario = new {
                         Id = usuarioDb.Id,
                         Nombre = usuarioDb.NombreCompleto,
-                        Rol = usuarioDb.Rol
+                        Rol = usuarioDb.Rol,
+                        DebeCambiarContrasena = usuarioDb.DebeCambiarContrasena
                     }
                 });
             }
@@ -166,6 +108,38 @@ namespace SigpaBackend.Controllers
                 _logger.LogError(exception, "Falló el inicio de sesión en SIGPA.");
                 return Problem("No fue posible completar el inicio de sesión.");
             }
+        }
+
+        [Authorize]
+        [HttpPost("password-changed")]
+        public async Task<IActionResult> ConfirmarCambioContrasena(
+            [FromBody] CambiarContrasenaDto request,
+            CancellationToken cancellationToken)
+        {
+            var userId = UserAccessService.GetUserId(User);
+            if (userId is null) return Unauthorized();
+
+            var user = await _context.Usuarios.FirstOrDefaultAsync(
+                item => item.Id == userId.Value, cancellationToken);
+            if (user is null || !user.Activo) return Forbid();
+            if (!user.DebeCambiarContrasena)
+                return BadRequest("La cuenta no requiere un cambio inicial de contraseña.");
+
+            try
+            {
+                await _supabaseAdmin.ChangePasswordAsync(user.Id, request.Contrasena, cancellationToken);
+            }
+            catch (HttpRequestException exception)
+            {
+                _logger.LogError(exception, "Supabase Auth no pudo cambiar la contraseña inicial del usuario {UserId}.", user.Id);
+                return Problem(statusCode: StatusCodes.Status502BadGateway,
+                    title: "El proveedor de identidad no pudo actualizar la contraseña.");
+            }
+
+            user.DebeCambiarContrasena = false;
+            _audit.Record(user.Id, "usuario.contrasena_inicial_actualizada", "usuario", user.Id);
+            await _context.SaveChangesAsync(cancellationToken);
+            return NoContent();
         }
     }
 }

@@ -32,6 +32,9 @@ create table if not exists public.notificaciones (
 alter table public.proyectos
   add column if not exists curso_id uuid references public.cursos(id) on delete restrict;
 
+alter table public.proyecto_integrantes
+  add column if not exists estado text not null default 'Aceptado';
+
 create index if not exists matriculas_estudiante_estado_idx
   on public.matriculas(estudiante_id, estado);
 create index if not exists notificaciones_usuario_fecha_idx
@@ -85,7 +88,8 @@ using (usuario_id = (select auth.uid()));
 alter table public.proyectos
   add column if not exists fecha_correccion_hasta timestamptz,
   add column if not exists problema text not null default '',
-  add column if not exists objetivo_general text not null default '';
+  add column if not exists objetivo_general text not null default '',
+  add column if not exists comentarios_evaluacion text;
 
 alter table public.proyectos drop constraint if exists proyectos_estado_check;
 alter table public.proyectos
@@ -115,7 +119,6 @@ where fecha_limite is null;
 alter table public.entregables alter column fecha_limite set not null;
 
 alter table public.proyecto_integrantes
-  add column if not exists estado text not null default 'Aceptado',
   add column if not exists invitado_por uuid references public.usuarios(id) on delete set null,
   add column if not exists respondido_at timestamptz;
 

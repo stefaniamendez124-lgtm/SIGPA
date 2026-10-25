@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { RoleDashboard } from './components/dashboard/RoleDashboard';
 import { hasSupabaseConfig, supabase } from './supabaseClient';
+import { apiFetch, getApiError } from './utility/api';
 
 type UserSession = {
   id: string;
@@ -9,7 +10,62 @@ type UserSession = {
   email: string;
   role: 'Estudiante' | 'Profesor' | 'Coordinador' | 'Administrador';
   token?: string;
+  mustChangePassword?: boolean;
 };
+
+type UserProfile = {
+  nombre_completo: string | null;
+  rol: string;
+  activo: boolean;
+  debe_cambiar_contrasena: boolean;
+};
+
+async function loadUserProfile(userId: string): Promise<{
+  profile: UserProfile | null;
+  error: Error | null;
+}> {
+  const currentResult = await supabase
+    .from('usuarios')
+    .select('nombre_completo, rol, activo, debe_cambiar_contrasena')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (!currentResult.error) {
+    return {
+      profile: currentResult.data
+        ? {
+            nombre_completo: currentResult.data.nombre_completo,
+            rol: currentResult.data.rol,
+            activo: currentResult.data.activo,
+            debe_cambiar_contrasena: currentResult.data.debe_cambiar_contrasena,
+          }
+        : null,
+      error: null,
+    };
+  }
+
+  if (currentResult.error.code !== '42703' && currentResult.error.code !== 'PGRST204') {
+    return { profile: null, error: currentResult.error };
+  }
+
+  const legacyResult = await supabase
+    .from('usuarios')
+    .select('nombre_completo, rol')
+    .eq('id', userId)
+    .maybeSingle();
+
+  return {
+    profile: legacyResult.data
+      ? {
+          nombre_completo: legacyResult.data.nombre_completo,
+          rol: legacyResult.data.rol,
+          activo: true,
+          debe_cambiar_contrasena: false,
+        }
+      : null,
+    error: legacyResult.error,
+  };
+}
 
 const normalizeRole = (value?: string): UserSession['role'] => {
   const normalized = (value ?? '').toLowerCase();
@@ -28,6 +84,10 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordRecoverySent, setPasswordRecoverySent] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -51,29 +111,42 @@ export default function App() {
           return;
         }
 
-        const { data: profile, error: profileError } = await supabase
-          .from('usuarios')
-          .select('nombre_completo, rol')
-          .eq('id', authSession.user.id)
-          .single();
+        const { profile, error: profileError } = await loadUserProfile(authSession.user.id);
 
-        if (profileError || !profile) {
+        if (profileError) {
           await supabase.auth.signOut();
           localStorage.removeItem('sigpa_session');
           if (active) {
-            setErrorMsg('No se encontró el perfil del usuario. Ejecuta el SQL de configuración de Supabase y vuelve a intentar.');
+            setErrorMsg(`No se pudo consultar el perfil: ${profileError.message}`);
           }
+          return;
+        }
+        if (!profile) {
+          await supabase.auth.signOut();
+          localStorage.removeItem('sigpa_session');
+          if (active) {
+            setErrorMsg('La cuenta inició sesión, pero no tiene un perfil vinculado en SIGPA. Contacta al Coordinador Académico para vincularla sin modificar el esquema de la base de datos.');
+          }
+          return;
+        }
+        if (!profile.activo) {
+          await supabase.auth.signOut();
+          localStorage.removeItem('sigpa_session');
+          if (active) setErrorMsg('La cuenta está deshabilitada. Contacta al Coordinador Académico.');
           return;
         }
 
         if (active) {
+          const forcePasswordChange = profile.debe_cambiar_contrasena === true;
           applySession({
             id: authSession.user.id,
             name: profile.nombre_completo || authSession.user.email || 'Usuario SIGPA',
             email: authSession.user.email ?? '',
             role: normalizeRole(profile.rol),
             token: authSession.access_token,
+            mustChangePassword: forcePasswordChange,
           });
+          setMustChangePassword(forcePasswordChange);
         }
       } catch (restoreError) {
         if (active) {
@@ -94,6 +167,7 @@ export default function App() {
 
   const applySession = (user: UserSession) => {
     setSession(user);
+    setMustChangePassword(user.mustChangePassword === true);
     localStorage.setItem('sigpa_session', JSON.stringify(user));
   };
 
@@ -118,24 +192,32 @@ export default function App() {
         return;
       }
 
-      const { data: profile, error: profileError } = await supabase
-        .from('usuarios')
-        .select('nombre_completo, rol')
-        .eq('id', authData.user.id)
-        .single();
+      const { profile, error: profileError } = await loadUserProfile(authData.user.id);
 
-      if (profileError || !profile) {
+      if (profileError) {
         await supabase.auth.signOut();
-        setErrorMsg('No se encontró el perfil del usuario. Ejecuta el SQL de configuración de Supabase y vuelve a intentar.');
+        setErrorMsg(`No se pudo consultar el perfil: ${profileError.message}`);
+        return;
+      }
+      if (!profile) {
+        await supabase.auth.signOut();
+        setErrorMsg('La cuenta inició sesión, pero no tiene un perfil vinculado en SIGPA. Contacta al Coordinador Académico para vincularla sin modificar el esquema de la base de datos.');
+        return;
+      }
+      if (!profile.activo) {
+        await supabase.auth.signOut();
+        setErrorMsg('La cuenta está deshabilitada. Contacta al Coordinador Académico.');
         return;
       }
 
+      const forcePasswordChange = profile.debe_cambiar_contrasena === true;
       applySession({
         id: authData.user.id,
         name: profile.nombre_completo || authData.user.email || 'Usuario SIGPA',
         email: authData.user.email ?? email,
         role: normalizeRole(profile.rol),
         token: authData.session.access_token,
+        mustChangePassword: forcePasswordChange,
       });
     } catch (loginError) {
       setErrorMsg(loginError instanceof Error ? loginError.message : 'No se pudo conectar con Supabase.');
@@ -149,6 +231,57 @@ export default function App() {
     setSession(null);
     localStorage.removeItem('sigpa_session');
     setErrorMsg(null);
+  };
+
+  const handlePasswordChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setErrorMsg(null);
+    if (newPassword.length < 12 || !/[A-Z]/.test(newPassword) ||
+        !/[a-z]/.test(newPassword) || !/\d/.test(newPassword) ||
+        !/[^A-Za-z0-9]/.test(newPassword)) {
+      setErrorMsg('Usa al menos 12 caracteres e incluye mayúscula, minúscula, número y símbolo.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setErrorMsg('Las contraseñas no coinciden.');
+      return;
+    }
+
+    setAuthLoading(true);
+    try {
+      const response = await apiFetch('/api/auth/password-changed', {
+        method: 'POST',
+        body: JSON.stringify({ contrasena: newPassword }),
+      });
+      if (!response.ok) throw new Error(await getApiError(response));
+      setMustChangePassword(false);
+      setNewPassword('');
+      setConfirmPassword('');
+      if (session) applySession({ ...session, mustChangePassword: false });
+    } catch (changeError) {
+      setErrorMsg(changeError instanceof Error ? changeError.message : 'No se pudo actualizar la contraseña.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handlePasswordRecovery = async () => {
+    setErrorMsg(null);
+    setPasswordRecoverySent(false);
+    if (!email.trim()) {
+      setErrorMsg('Escribe tu correo institucional para solicitar el restablecimiento.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim());
+      if (error) throw error;
+      setPasswordRecoverySent(true);
+    } catch (recoveryError) {
+      setErrorMsg(recoveryError instanceof Error ? recoveryError.message : 'No se pudo solicitar el restablecimiento.');
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   if (loading) {
@@ -165,6 +298,27 @@ export default function App() {
         }}
       >
         Cargando SIGPA...
+      </div>
+    );
+  }
+
+  if (session && mustChangePassword) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: '24px', background: '#020817', color: '#f8fafc', fontFamily: 'sans-serif' }}>
+        <form onSubmit={handlePasswordChange} style={{ width: '100%', maxWidth: '480px', padding: '28px', borderRadius: '16px', background: '#111827', display: 'grid', gap: '14px' }}>
+          <h1 style={{ margin: 0 }}>Cambia tu contraseña temporal</h1>
+          <p style={{ color: '#94a3b8' }}>Por seguridad, debes crear una contraseña nueva antes de usar SIGPA.</p>
+          {errorMsg && <p role="alert" style={{ color: '#fecaca' }}>{errorMsg}</p>}
+          <label>Nueva contraseña
+            <input required type="password" minLength={12} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+          </label>
+          <label>Confirmar contraseña
+            <input required type="password" minLength={12} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
+          </label>
+          <p>Al menos 12 caracteres con mayúscula, minúscula, número y símbolo.</p>
+          <button type="submit" disabled={authLoading}>{authLoading ? 'Actualizando...' : 'Actualizar contraseña'}</button>
+          <button type="button" disabled={authLoading} onClick={() => void handleLogout()}>Cerrar sesión</button>
+        </form>
       </div>
     );
   }
@@ -232,6 +386,11 @@ export default function App() {
             >
               {errorMsg}
             </div>
+          )}
+          {passwordRecoverySent && (
+            <p role="status" style={{ color: '#bbf7d0', textAlign: 'center' }}>
+              Si la cuenta existe, recibirás un correo con instrucciones para recuperar el acceso.
+            </p>
           )}
 
           <div style={{ marginBottom: '18px' }}>
@@ -301,6 +460,9 @@ export default function App() {
             }}
           >
             {authLoading ? 'Verificando...' : 'Ingresar'}
+          </button>
+          <button type="button" onClick={() => void handlePasswordRecovery()} disabled={authLoading} style={{ width: '100%', marginTop: '12px' }}>
+            Olvidé mi contraseña
           </button>
         </form>
       </div>

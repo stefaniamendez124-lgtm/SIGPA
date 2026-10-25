@@ -1,6 +1,6 @@
-﻿import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ProjectWorkspace } from './ProjectWorkspace';
-import { supabase } from '../../supabaseClient';
+import { CoordinatorDashboard } from './CoordinatorDashboard';
 import { apiFetch, getApiError } from '../../utility/api';
 
 type UserRole = 'Estudiante' | 'Profesor' | 'Coordinador' | 'Administrador';
@@ -18,7 +18,6 @@ type ProjectStatus = 'Pendiente' | 'Pendiente de Revisión' | 'En revisión' | '
 type CourseOption = { id: string; codigo: string; nombre: string };
 type StudentOption = { id: string; nombreCompleto: string; correoInstitucional: string };
 type ProjectInvitation = { proyectoId: string; titulo: string; asignatura: string; invitadaAt: string };
-type NotificationItem = { id: string; tipo: string; mensaje: string; creadaAt: string; leidaAt: string | null };
 
 type ProjectItem = {
   id: string;
@@ -60,7 +59,6 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
   const [projectSpecificObjectives, setProjectSpecificObjectives] = useState('');
   const [courses, setCourses] = useState<CourseOption[]>([]);
   const [invitations, setInvitations] = useState<ProjectInvitation[]>([]);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [coursePeers, setCoursePeers] = useState<StudentOption[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState('');
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
@@ -74,26 +72,30 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
     setProjectError(null);
 
     try {
-      const { data, error } = await supabase
-        .from('proyectos')
-        .select('id, nombre, descripcion, curso, estado, progreso, fecha_entrega, creador_id, created_at')
-        .order('created_at', { ascending: false });
+      const response = await apiFetch('/api/proyectos');
+      if (!response.ok) throw new Error(await getApiError(response));
+      const data = await response.json() as Array<{
+        id: string;
+        nombre: string;
+        descripcion: string;
+        problema?: string;
+        curso: string;
+        estado: ProjectStatus;
+        progreso: number;
+        fechaEntrega: string | null;
+      }>;
 
-      if (error) {
-        throw error;
-      }
-
-      const mapped: ProjectItem[] = (data ?? []).map((project) => ({
+      const mapped: ProjectItem[] = data.map((project) => ({
         id: project.id,
         title: project.nombre,
-        description: project.descripcion,
+        description: project.problema ?? project.descripcion,
         course: project.curso,
-        status: project.estado as ProjectStatus,
+        status: project.estado,
         progress: project.progreso,
-        dueDate: project.fecha_entrega
-          ? new Date(`${project.fecha_entrega}T00:00:00`).toLocaleDateString('es-ES')
+        dueDate: project.fechaEntrega
+          ? new Date(`${project.fechaEntrega}T00:00:00`).toLocaleDateString('es-ES')
           : 'Sin fecha',
-        members: [project.creador_id === user.id ? user.name : 'Estudiante SIGPA'],
+        members: [user.name],
       }));
 
       if (user.role === 'Estudiante') {
@@ -122,16 +124,6 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
     }
   };
 
-  const syncNotifications = async () => {
-    try {
-      const response = await apiFetch('/api/notificaciones');
-      if (!response.ok) throw new Error(await getApiError(response));
-      setNotifications(await response.json() as NotificationItem[]);
-    } catch (loadError) {
-      setProjectError(`No se pudieron cargar las notificaciones: ${getErrorMessage(loadError)}`);
-    }
-  };
-
   useEffect(() => {
     let active = true;
     const loadCourses = async () => {
@@ -156,7 +148,6 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
 
   useEffect(() => {
     if (user.role === 'Estudiante') void syncInvitations();
-    void syncNotifications();
   }, [user.id, user.role]);
 
   useEffect(() => {
@@ -301,22 +292,7 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
             {projectError}
           </div>
         )}
-        {notifications.length > 0 && (
-          <section aria-labelledby="notifications-heading" style={{ ...cardStyle, padding: '16px 20px', marginBottom: '24px' }}>
-            <h2 id="notifications-heading" style={{ margin: '0 0 10px', fontSize: '20px' }}>Notificaciones</h2>
-            <ul style={{ display: 'grid', gap: '8px', margin: 0, paddingLeft: '20px' }}>
-              {notifications.slice(0, 5).map((notification) => (
-                <li key={notification.id}>
-                  <span>{notification.mensaje}</span>
-                  <time dateTime={notification.creadaAt} style={{ marginLeft: '8px', color: '#94a3b8' }}>
-                    {new Date(notification.creadaAt).toLocaleString('es-ES')}
-                  </time>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '18px', marginBottom: '28px' }}>
+        {user.role !== 'Coordinador' && <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '18px', marginBottom: '28px' }}>
           {user.role === 'Estudiante' ? (
             <>
               <MetricCard label="Proyectos" value={String(stats.total)} hint="activos" />
@@ -332,9 +308,9 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
               <MetricCard label="Aprobados" value={String(stats.aprobados)} hint="finalizados" />
             </>
           )}
-        </section>
+        </section>}
 
-        {user.role === 'Estudiante' ? (
+        {user.role === 'Coordinador' ? <CoordinatorDashboard /> : user.role === 'Estudiante' ? (
           <>
           {invitations.length > 0 && (
             <section aria-labelledby="pending-invitations" style={{ ...cardStyle, padding: '20px', marginBottom: '24px' }}>
@@ -481,6 +457,7 @@ export function RoleDashboard({ user, onLogout }: { user: UserSession; onLogout:
                         </>
                       )}
                     </div>
+                    <ProjectWorkspace projectId={project.id} mode="teacher" />
                   </div>
                 ))}
               </div>

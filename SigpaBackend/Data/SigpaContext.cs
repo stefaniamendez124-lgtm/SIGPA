@@ -10,6 +10,7 @@ namespace SigpaBackend.Data
         public DbSet<Usuario> Usuarios { get; set; }
         public DbSet<Curso> Cursos { get; set; }
         public DbSet<Matricula> Matriculas { get; set; }
+        public DbSet<DocenteCurso> DocentesCursos { get; set; }
         public DbSet<Notificacion> Notificaciones { get; set; }
         public DbSet<Proyecto> Proyectos { get; set; }
         public DbSet<ProyectoIntegrante> ProyectoIntegrantes { get; set; }
@@ -32,6 +33,10 @@ namespace SigpaBackend.Data
 
             modelBuilder.Entity<Matricula>()
                 .HasIndex(enrollment => new { enrollment.CursoId, enrollment.EstudianteId })
+                .IsUnique();
+
+            modelBuilder.Entity<DocenteCurso>()
+                .HasIndex(assignment => new { assignment.UsuarioId, assignment.CursoId })
                 .IsUnique();
 
             modelBuilder.Entity<Proyecto>()

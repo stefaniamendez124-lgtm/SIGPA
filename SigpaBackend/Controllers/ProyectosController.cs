@@ -5,6 +5,7 @@ using SigpaBackend.Data;
 using SigpaBackend.Models;
 using SigpaBackend.Services;
 using System.Data;
+using Npgsql;
 
 namespace SigpaBackend.Controllers
 {
@@ -25,21 +26,56 @@ namespace SigpaBackend.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> ObtenerProyectos()
+        public async Task<IActionResult> ObtenerProyectos(CancellationToken cancellationToken)
         {
             var userId = UserAccessService.GetUserId(User);
             if (userId is null) return Unauthorized();
 
             var esPersonal = await _access.IsStaffAsync(userId.Value);
-            var proyectos = await _context.Proyectos
-                .Where(project => esPersonal ||
-                    project.CreadorId == userId.Value ||
-                    _context.ProyectoIntegrantes.Any(member =>
-                        member.ProyectoId == project.Id &&
-                        member.UsuarioId == userId.Value &&
-                        member.Estado == "Aceptado"))
-                .OrderByDescending(p => p.FechaInicio ?? DateTime.UtcNow)
-                .ToListAsync();
+            var integrantesDisponibles = await _context.Database
+                .SqlQueryRaw<bool>(
+                    "SELECT to_regclass('public.proyecto_integrantes') IS NOT NULL AS \"Value\"")
+                .SingleAsync(cancellationToken);
+            const string selectProjectsSql = """
+                SELECT
+                    project.id AS id,
+                    project.nombre AS nombre,
+                    project.descripcion AS descripcion,
+                    COALESCE(to_jsonb(project)->>'problema', project.descripcion) AS problema,
+                    COALESCE(to_jsonb(project)->>'objetivo_general', '') AS objetivo_general,
+                    COALESCE(to_jsonb(project)->>'curso', 'Ingeniería de requisitos') AS curso,
+                    project.estado AS estado,
+                    COALESCE(NULLIF(to_jsonb(project)->>'progreso', '')::integer, 0) AS progreso,
+                    NULLIF(to_jsonb(project)->>'fecha_inicio', '')::timestamptz AS fecha_inicio,
+                    NULLIF(to_jsonb(project)->>'fecha_fin', '')::timestamptz AS fecha_fin,
+                    NULLIF(to_jsonb(project)->>'fecha_entrega', '')::date AS fecha_entrega,
+                    project.creador_id AS creador_id,
+                    to_jsonb(project)->>'comentarios_evaluacion' AS comentarios_evaluacion
+                FROM public.proyectos AS project
+                WHERE @esPersonal
+                   OR project.creador_id = @userId
+                """;
+            const string memberFilterSql = """
+                   OR EXISTS (
+                        SELECT 1
+                        FROM public.proyecto_integrantes AS member
+                        WHERE member.proyecto_id = project.id
+                          AND member.usuario_id = @userId
+                          AND member.estado = 'Aceptado'
+                   )
+                """;
+            const string orderProjectsSql = """
+                ORDER BY to_jsonb(project)->>'fecha_inicio' DESC NULLS LAST
+                """;
+            var query = selectProjectsSql +
+                        (integrantesDisponibles ? memberFilterSql : string.Empty) +
+                        orderProjectsSql;
+            var proyectos = await _context.Database
+                .SqlQueryRaw<ProyectoListadoDto>(
+                    query,
+                    new NpgsqlParameter("esPersonal", esPersonal),
+                    new NpgsqlParameter("userId", userId.Value))
+                .ToListAsync(cancellationToken);
 
             return Ok(proyectos);
         }
@@ -139,11 +175,21 @@ namespace SigpaBackend.Controllers
             var course = await _context.Cursos
                 .FirstOrDefaultAsync(item => item.Id == request.CursoId && item.Activo);
             if (course is null) return BadRequest("La asignatura seleccionada no está activa.");
-            var courseTeacherId = course.DocenteId;
-            if (courseTeacherId is null ||
-                !await _context.Usuarios.AnyAsync(user =>
-                    user.Id == courseTeacherId.Value && user.Rol == "Profesor"))
-                return Conflict("La asignatura no tiene un docente responsable configurado para recibir la notificación.");
+            var courseTeacherIds = await _context.DocentesCursos
+                .Where(assignment => assignment.CursoId == course.Id)
+                .Select(assignment => assignment.UsuarioId)
+                .ToListAsync();
+            if (course.DocenteId.HasValue)
+                courseTeacherIds.Add(course.DocenteId.Value);
+            var validTeacherIds = await _context.Usuarios
+                .Where(user => courseTeacherIds.Contains(user.Id) &&
+                               user.Rol == "Profesor" &&
+                               user.Activo)
+                .Select(user => user.Id)
+                .Distinct()
+                .ToListAsync();
+            if (validTeacherIds.Count == 0)
+                return Conflict("La asignatura no tiene un docente responsable configurado para revisar proyectos.");
 
             await using var transaction = await _context.Database.BeginTransactionAsync(IsolationLevel.Serializable);
             var memberIds = request.IntegrantesIds.Append(userId.Value).ToArray();
@@ -208,13 +254,6 @@ namespace SigpaBackend.Controllers
                     Estado = "Invitado",
                     InvitadoPor = userId.Value
                 }));
-            _context.Notificaciones.Add(new Notificacion
-            {
-                UsuarioId = userId.Value,
-                ProyectoId = project.Id,
-                Tipo = "ProyectoRegistrado",
-                Mensaje = $"Tu proyecto «{project.Nombre}» quedó pendiente de revisión."
-            });
             _context.ObjetivosEspecificos.AddRange(request.ObjetivosEspecificos.Select((objective, index) =>
                 new ObjetivoEspecifico
                 {
@@ -222,23 +261,6 @@ namespace SigpaBackend.Controllers
                     Descripcion = objective.Trim(),
                     Orden = index + 1
                 }));
-            foreach (var studentId in request.IntegrantesIds)
-            {
-                _context.Notificaciones.Add(new Notificacion
-                {
-                    UsuarioId = studentId,
-                    ProyectoId = project.Id,
-                    Tipo = "InvitacionProyecto",
-                    Mensaje = $"Te invitaron a integrar el proyecto «{project.Nombre}» de {course.Nombre}."
-                });
-            }
-            _context.Notificaciones.Add(new Notificacion
-            {
-                UsuarioId = courseTeacherId.Value,
-                ProyectoId = project.Id,
-                Tipo = "ProyectoPendienteRevision",
-                Mensaje = $"El proyecto «{project.Nombre}» está pendiente de revisión."
-            });
             _audit.Record(userId, "proyecto.creado", "proyecto", project.Id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -400,13 +422,6 @@ namespace SigpaBackend.Controllers
             };
 
             _context.ProyectoIntegrantes.Add(nuevoIntegrante);
-            _context.Notificaciones.Add(new Notificacion
-            {
-                UsuarioId = request.UsuarioId,
-                ProyectoId = id,
-                Tipo = "InvitacionProyecto",
-                Mensaje = $"Te invitaron a integrar el proyecto «{proyecto.Nombre}»."
-            });
             _audit.Record(currentUserId, "equipo.integrante_agregado", "proyecto", id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
@@ -457,13 +472,6 @@ namespace SigpaBackend.Controllers
                 InvitadoPor = currentUserId.Value
             };
             _context.ProyectoIntegrantes.Add(invitation);
-            _context.Notificaciones.Add(new Notificacion
-            {
-                UsuarioId = request.UsuarioId,
-                ProyectoId = id,
-                Tipo = "InvitacionProyecto",
-                Mensaje = $"Te invitaron a integrar el proyecto «{project.Nombre}»."
-            });
             _audit.Record(currentUserId, "equipo.invitacion_enviada", "proyecto", id);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();

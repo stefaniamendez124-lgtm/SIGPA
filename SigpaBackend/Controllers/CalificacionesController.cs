@@ -106,7 +106,16 @@ public class CalificacionesController : ControllerBase
         if (deliverable is null ||
             !await _access.CanReviewProjectAsync(deliverable.ProyectoId, userId.Value))
             return Forbid();
-        if (evaluation.Publicada) return Conflict("La calificación ya fue publicada.");
+        if (evaluation.Publicada)
+        {
+            return Ok(new
+            {
+                evaluation.Id,
+                evaluation.PuntajeFinal,
+                evaluation.PublicadaAt,
+                yaPublicada = true
+            });
+        }
 
         evaluation.Publicada = true;
         evaluation.PublicadaAt = DateTime.UtcNow;

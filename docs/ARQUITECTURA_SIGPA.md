@@ -7,8 +7,8 @@ diseño implementable. El repositorio parte de React 18/Vite, una API ASP.NET
 Core 10, PostgreSQL mediante Npgsql y autenticación Supabase. El esquema actual
 ya contiene usuarios, proyectos, integrantes, entregables, criterios de rúbrica
 y tareas Kanban. `SigpaBackend/Supabase/extension_academica.sql` añade, sin
-reemplazar el esquema existente, cursos y matrículas activas, notificaciones,
-objetivos específicos, invitaciones y reglas de equipo, riesgos, entregas
+reemplazar el esquema existente, cursos y matrículas activas, objetivos específicos,
+invitaciones y reglas de equipo, riesgos, entregas
 tardías, rúbricas estrictas, calificaciones, auditoría append-only y un bucket
 privado de entregables. Las mutaciones de proyectos, entregas y Kanban se
 validan en la API; Supabase se conserva para autenticación y lectura del
@@ -18,9 +18,10 @@ Este modelo sigue siendo gradual: asignaturas y matrículas aún no están
 enlazadas a periodos, y faltan sincronización LMS efectiva, exportaciones
 asíncronas y un worker de correo. RN-02 usa `curso_id` y matrícula activa en
 proyectos nuevos; se conserva `proyectos.curso` para proyectos históricos. Las
-notificaciones de proyecto quedan persistidas y disponibles por API. La
-extensión SQL debe aplicarse y probarse en staging con copia de seguridad antes
-de producción.
+notificaciones persistentes están deshabilitadas: el endpoint de compatibilidad
+responde una lista vacía y las invitaciones se consultan desde las membresías del
+proyecto. La extensión SQL debe aplicarse y probarse en staging con copia de
+seguridad antes de producción.
 
 ## 2. Arquitectura propuesta
 
@@ -295,10 +296,19 @@ adaptador separado; el JWT de la API no sustituye la validación LTI.
 
 - Migración aditiva `SigpaBackend/Supabase/extension_academica.sql`; aplicar
   después de `schema.sql`. No se modificó ni sustituyó el esquema base.
+- Administración centralizada en `api/v1/usuarios`: autorización de coordinador
+  consultada contra el perfil activo en PostgreSQL, paginación/búsqueda/filtros,
+  edición, deshabilitación, matrículas y asignaciones docentes.
+- Migración aditiva `SigpaBackend/Supabase/usuarios_centralizados.sql` para
+  datos de identidad académica, índices, cursos docentes y vistas compatibles
+  con las tablas existentes `cursos`/`matriculas`.
+- Registro público cerrado. Las identidades se crean vía Supabase Auth Admin,
+  con contraseña temporal aleatoria y cambio requerido al primer acceso.
+  Supabase Auth aplica el hash de contraseña; SIGPA no almacena hashes propios.
+- Carga masiva con validación previa de CSV/XLSX, reporte de errores por fila
+  y confirmación de registros válidos.
 - Políticas de proyecto, equipo y entregables revisadas para preservar el alta
   del dashboard actual y restringir cambios de estado a personal docente.
-- Registro público limitado a cuentas Estudiante y validación JWT Supabase
-  obligatoria; ya no se aceptan roles privilegiados en el formulario de registro.
 - Propuestas con objetivos, dictamen docente, plazo de corrección de tres días,
   invitaciones con aceptación, y bloqueos de cupo/asignación con transacción y
   trigger PostgreSQL.
@@ -309,25 +319,35 @@ adaptador separado; el JWT de la API no sustituye la validación LTI.
 
 Para el backend configura `Supabase:Url`, `Supabase:ServiceKey`,
 `Supabase:DeliverablesBucket` (por defecto `entregables`), `DATABASE_URL` o
-`ConnectionStrings:DefaultConnection`, y `Cors:AllowedOrigins`. La clave de
-servicio solo puede estar en el servidor. La extensión crea/asegura el bucket
+`ConnectionStrings:DefaultConnection`, `Cors:AllowedOrigins` y, si se habilita
+el correo de bienvenida, las credenciales `Smtp:*`. La clave de servicio solo
+puede estar en el servidor. La extensión crea/asegura el bucket
 privado `entregables` con límite de 25 MiB y MIME PDF/ZIP. La API usa una
 conexión de base de datos privilegiada del servidor para las operaciones
 protegidas; no enviar la clave service-role al navegador.
 
 ### Pendiente de integración
 
-1. Normalizar programas, periodos, asignaturas y matrículas y validar
-   matriculación activa desde una fuente institucional.
-2. Implementar asignación de docentes por asignatura y alcance institucional en
-   vez de conceder alcance global por el rol docente actual.
-3. Incorporar niveles de logro por criterio y versionado de rúbrica/calificación.
-4. Ejecutar un worker/outbox real para correo y sincronización Moodle/Canvas;
-   los endpoints de integración LTI/OAuth2 requieren configuración del LMS.
-5. Implementar KPIs del coordinador, alertas con umbral académico configurable,
-   PDF/XLSX y procesamiento en segundo plano para más de 500 proyectos.
-6. Conectar las nuevas pantallas de riesgo, rúbrica, evaluación y entregas al
-   API; el dashboard actual mantiene sus lecturas/escrituras Supabase existentes.
+1. Sincronizar programas, periodos académicos y matrículas desde una fuente
+   institucional. El panel de administración permite filtrar por los programas,
+   semestres y asignaturas configurados en los cursos.
+2. Extender la configuración docente de hitos al ámbito del curso y añadir
+   versionado de rúbricas. La UI ya permite crear hitos por proyecto, definir
+   criterios con niveles de logro y evaluar/publicar entregas.
+3. Ejecutar un worker/outbox durable para correo y sincronización Moodle/Canvas.
+   La autenticación y los lanzamientos LTI 1.3/OAuth2 requieren configuración
+   y credenciales del LMS institucional.
+4. Añadir exportación real PDF/XLSX y procesamiento durable en segundo plano
+   con enlace por correo para consultas de más de 500 registros.
+5. Completar el refresco en tiempo real multiinstancia del Kanban; la UI actual
+   actualiza los datos después de cada operación y el panel del coordinador
+   refresca sus métricas cada 30 segundos.
+6. Configurar y verificar retención de auditoría de cinco años en el entorno
+   PostgreSQL de producción, incluyendo respaldos y controles operativos.
+
+Las vistas de estudiantes ya consultan la API para mostrar retroalimentación
+publicada y mantener la bitácora de riesgos. El acceso docente para dictaminar
+propuestas se restringe al docente activo asignado al curso del proyecto.
 
 Pruebas mínimas antes de producción: restricciones y migraciones sobre una DB
 PostgreSQL real; pruebas concurrentes de invitaciones/cupo; rúbrica con sumas

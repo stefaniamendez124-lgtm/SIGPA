@@ -35,6 +35,9 @@ public sealed class UserAccessService
 
     public async Task<bool> IsProjectMemberAsync(Guid projectId, Guid userId)
     {
+        if (!await _context.Usuarios.AnyAsync(user => user.Id == userId))
+            return false;
+
         return await _context.Proyectos.AnyAsync(project =>
             project.Id == projectId &&
             (project.CreadorId == userId ||
@@ -46,7 +49,12 @@ public sealed class UserAccessService
 
     public async Task<bool> CanReadProjectAsync(Guid projectId, Guid userId)
     {
-        return await IsProjectMemberAsync(projectId, userId) || await IsStaffAsync(userId);
+        if (await IsProjectMemberAsync(projectId, userId))
+            return true;
+        if (await HasRoleAsync(userId, "Coordinador", "Administrador"))
+            return true;
+
+        return await CanReviewProjectAsync(projectId, userId);
     }
 
     public async Task<bool> CanReviewProjectAsync(Guid projectId, Guid userId)
@@ -54,6 +62,14 @@ public sealed class UserAccessService
         var isTeacher = await HasRoleAsync(userId, "Profesor");
         if (!isTeacher) return false;
 
-        return await _context.Proyectos.AnyAsync(project => project.Id == projectId);
+        return await _context.Proyectos.AnyAsync(project =>
+            project.Id == projectId &&
+            project.CursoId.HasValue &&
+            _context.Cursos.Any(course =>
+                course.Id == project.CursoId.Value &&
+                course.Activo &&
+                (course.DocenteId == userId ||
+                 _context.DocentesCursos.Any(assignment =>
+                     assignment.UsuarioId == userId && assignment.CursoId == course.Id))));
     }
 }
